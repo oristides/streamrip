@@ -24,7 +24,10 @@ CLIENT_SECRET = base64.b64decode(
 ).decode("iso-8859-1")
 AUTH = aiohttp.BasicAuth(login=CLIENT_ID, password=CLIENT_SECRET)
 STREAM_URL_REGEX = re.compile(
-    r"#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+,CODECS=\"(?!jpeg)[^\"]+\",RESOLUTION=\d+x\d+\n(.+)"
+    (
+        r"#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+,CODECS=\""
+        r"(?!jpeg)[^\"]+\",RESOLUTION=\d+x\d+\n(.+)"
+    )
 )
 
 QUALITY_MAP = {
@@ -105,7 +108,9 @@ class TidalClient(Client):
             logger.debug("filtering eps")
             album_resp, ep_resp = await asyncio.gather(
                 self._api_request(f"{url}/albums"),
-                self._api_request(f"{url}/albums", params={"filter": "EPSANDSINGLES"}),
+                self._api_request(
+                    f"{url}/albums", params={"filter": "EPSANDSINGLES"}
+                ),
             )
 
             item["albums"] = album_resp["items"]
@@ -113,7 +118,8 @@ class TidalClient(Client):
         elif media_type == "track":
             try:
                 resp = await self._api_request(
-                    f"tracks/{item_id!s}/lyrics", base="https://listen.tidal.com/v1"
+                    f"tracks/{item_id!s}/lyrics",
+                    base="https://listen.tidal.com/v1",
                 )
 
                 # Use unsynced lyrics for MP3, synced for others (FLAC, OPUS, etc)
@@ -123,12 +129,128 @@ class TidalClient(Client):
                 ):
                     item["lyrics"] = resp.get("lyrics") or ""
                 else:
-                    item["lyrics"] = resp.get("subtitles") or resp.get("lyrics") or ""
+                    item["lyrics"] = (
+                        resp.get("subtitles") or resp.get("lyrics") or ""
+                    )
             except TypeError as e:
                 logger.warning(f"Failed to get lyrics for {item_id}: {e}")
 
         logger.debug(item)
         return item
+
+    async def get_user_playlists(self) -> list[dict]:
+        """Return user's saved/owned playlists with id, name, and url.
+
+        Prefers the OpenAPI v2 "userCollections" endpoint to retrieve playlists.
+        Falls back to the v1 users playlists endpoint if available.
+        """
+        user_id = self.config.user_id
+        playlists: list[dict] = []
+
+        # First try v2 userCollections with include=playlists
+        try:
+            resp = await self._api_request(
+                f"userCollections/{user_id}",
+                params={"include": "playlists"},
+                base="https://openapi.tidal.com/v2",
+            )
+
+            included = resp.get("included") or []
+            for item in included:
+                if item.get("type") == "playlists":
+                    pid = str(item.get("id"))
+                    attrs = item.get("attributes") or {}
+                    title = (
+                        attrs.get("title")
+                        or attrs.get("name")
+                        or item.get("title")
+                        or item.get("name")
+                        or pid
+                    )
+                    playlists.append(
+                        {
+                            "id": pid,
+                            "name": title,
+                            "url": f"https://tidal.com/playlist/{pid}",
+                        }
+                    )
+
+            if playlists:
+                return playlists
+        except Exception as e:
+            logger.debug(f"Falling back to v1 playlists due to: {e}")
+
+        # Fallback: try v1 users playlists
+        try:
+            resp_v1 = await self._api_request(f"users/{user_id}/playlists")
+            for p in resp_v1.get("items", []):
+                pid = str(p.get("uuid") or p.get("id"))
+                if not pid:
+                    continue
+                title = p.get("title") or p.get("name") or pid
+                playlists.append(
+                    {
+                        "id": pid,
+                        "name": title,
+                        "url": f"https://tidal.com/playlist/{pid}",
+                    }
+                )
+        except Exception as e:
+            logger.debug(f"Unable to retrieve v1 playlists: {e}")
+
+        return playlists
+
+    async def get_recommended_playlists(self) -> list[dict]:
+        """Return recommended discovery mix playlists for the current user.
+
+        Uses the OpenAPI v2 userRecommendations discoveryMixes relationship.
+        """
+        user_id = self.config.user_id
+        playlists: list[dict] = []
+
+        try:
+            resp = await self._api_request(
+                f"userRecommendations/{user_id}/relationships/discoveryMixes",
+                params={"include": "discoveryMixes"},
+                base="https://openapi.tidal.com/v2",
+            )
+
+            # Data can be in data and/or included arrays
+            candidates = []
+            data_arr = resp.get("data") or []
+            incl_arr = resp.get("included") or []
+            if isinstance(data_arr, list):
+                candidates.extend(data_arr)
+            if isinstance(incl_arr, list):
+                candidates.extend(incl_arr)
+
+            seen: set[str] = set()
+            for item in candidates:
+                if item.get("type") != "playlists":
+                    continue
+                pid = str(item.get("id"))
+                if not pid or pid in seen:
+                    continue
+                seen.add(pid)
+                attrs = item.get("attributes") or {}
+                title = (
+                    attrs.get("title")
+                    or attrs.get("name")
+                    or item.get("title")
+                    or item.get("name")
+                    or pid
+                )
+                playlists.append(
+                    {
+                        "id": pid,
+                        "name": title,
+                        "url": f"https://tidal.com/playlist/{pid}",
+                    }
+                )
+        except Exception as e:
+            logger.debug(f"Unable to retrieve discovery mixes: {e}")
+
+        return playlists
 
     async def search(self, media_type: str, query: str, limit: int = 100) -> list[dict]:
         """Search for a query.
@@ -167,7 +289,10 @@ class TidalClient(Client):
             raise Exception(resp["userMessage"])
         except JSONDecodeError:
             logger.warning(
-                f"Failed to get manifest for {track_id}. Retrying with lower quality."
+                (
+                    f"Failed to get manifest for {track_id}. Retrying with lower"
+                    " quality."
+                )
             )
             return await self.get_downloadable(track_id, quality - 1)
 

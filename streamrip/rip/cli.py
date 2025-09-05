@@ -15,12 +15,19 @@ from rich.logging import RichHandler
 from rich.markdown import Markdown
 from rich.prompt import Confirm
 from rich.traceback import install
+from rich.markup import escape
 
 from .. import __version__, db
-from ..config import DEFAULT_CONFIG_PATH, Config, OutdatedConfigError, set_user_defaults
+from ..config import (
+    DEFAULT_CONFIG_PATH,
+    Config,
+    OutdatedConfigError,
+    set_user_defaults,
+)
 from ..console import console
 from ..utils.ssl_utils import get_aiohttp_connector_kwargs
 from .main import Main
+from ..client.tidal import TidalClient
 
 
 def coro(f):
@@ -115,7 +122,10 @@ def rip(
 
     if not os.path.isfile(config_path):
         console.print(
-            f"No file found at [bold cyan]{config_path}[/bold cyan], creating default config.",
+            (
+                f"No file found at [bold cyan]{config_path}[/bold cyan], creating"
+                " default config."
+            ),
         )
         set_user_defaults(config_path)
 
@@ -132,8 +142,10 @@ def rip(
         c = Config(config_path)
     except Exception as e:
         console.print(
-            f"Error loading config from [bold cyan]{config_path}[/bold cyan]: {e}\n"
-            "Try running [bold]rip config reset[/bold]",
+            (
+                f"Error loading config from [bold cyan]{config_path}[/bold cyan]: {e}\n"
+                "Try running [bold]rip config reset[/bold]"
+            ),
         )
         ctx.obj["config"] = None
         return
@@ -196,9 +208,11 @@ async def url(ctx, urls):
                 latest_version, notes = await version_coro
                 if latest_version != __version__:
                     console.print(
-                        f"\n[green]A new version of streamrip [cyan]v{latest_version}[/cyan]"
-                        " is available! Run [white][bold]pip3 install streamrip --upgrade[/bold][/white]"
-                        " to update.[/green]\n"
+                        (
+                            f"\n[green]A new version of streamrip [cyan]v{latest_version}[/cyan]"
+                            " is available! Run [white][bold]pip3 install streamrip --upgrade"
+                            "[/bold][/white] to update.[/green]\n"
+                        )
                     )
 
                     console.print(Markdown(notes))
@@ -238,7 +252,10 @@ async def file(ctx, path):
                         loaded = False
                 if loaded:
                     console.print(
-                        f"Detected json file. Loading [yellow]{len(items)}[/yellow] items"
+                        (
+                            f"Detected json file. Loading [yellow]{len(items)}[/yellow]"
+                            " items"
+                        )
                     )
                     await main.add_all_by_id(
                         [(i["source"], i["media_type"], i["id"]) for i in items]
@@ -247,11 +264,17 @@ async def file(ctx, path):
                     s = set(items)
                     if len(s) < len(items):
                         console.print(
-                            f"Found [orange]{len(items)-len(s)}[/orange] repeated URLs!"
+                            (
+                                f"Found [orange]{len(items)-len(s)}[/orange] repeated"
+                                " URLs!"
+                            )
                         )
                         items = list(s)
                     console.print(
-                        f"Detected list of urls. Loading [yellow]{len(items)}[/yellow] items"
+                        (
+                            f"Detected list of urls. Loading [yellow]{len(items)}[/yellow]"
+                            " items"
+                        )
                     )
                     await main.add_all(items)
 
@@ -415,7 +438,10 @@ async def search(ctx, first, output_file, num_results, source, media_type, query
 @click.option(
     "-fs",
     "--fallback-source",
-    help="The source to search tracks on if no results were found with the main source.",
+    help=(
+        "The source to search tracks on if no results were found with the main"
+        " source."
+    ),
 )
 @click.argument("url", required=True)
 @click.pass_context
@@ -444,6 +470,168 @@ async def id(ctx, source, media_type, id):
     with ctx.obj["config"] as cfg:
         async with Main(cfg) as main:
             await main.add_by_id(source, media_type, id)
+            await main.resolve()
+            await main.rip()
+
+
+@rip.group()
+def tidal():
+    """TIDAL utilities: list and download playlists.
+
+    Commands:
+      list-playlists  List your playlists (or discovery mixes with
+                      --recommended) and show an indexed table with
+                      name and URL.
+      download        Download playlists by indices from the list,
+                      by exact names, or by URLs.
+
+    Examples:
+      rip tidal list-playlists
+      rip tidal list-playlists --recommended
+      rip tidal download -i "0,3"
+      rip tidal download -n "My Mix,Deep House Essentials"
+      rip tidal download -u "https://tidal.com/playlist/UUID"
+    """
+
+
+@tidal.command("list-playlists")
+@click.option(
+    "--recommended",
+    is_flag=True,
+    help=(
+        "Show recommended discovery playlists instead of your saved/owned playlists"
+    ),
+)
+@click.pass_context
+@coro
+async def tidal_list_playlists(ctx, recommended):
+    """Print an indexed list of TIDAL playlists.
+
+    By default shows your saved/owned playlists. Pass --recommended to
+    list discovery mixes recommended for your account.
+
+    The output table includes an index, the playlist name, and URL.
+    You can use the index(es) directly with 'rip tidal download -i'.
+    """
+    with ctx.obj["config"] as cfg:
+        async with Main(cfg) as main:
+            client = await main.get_logged_in_client("tidal")
+            assert isinstance(client, TidalClient)
+            if recommended:
+                playlists = await client.get_recommended_playlists()
+            else:
+                playlists = await client.get_user_playlists()
+
+    if not playlists:
+        console.print("[yellow]No playlists found.")
+        return
+
+    from rich.table import Table
+
+    t = Table(
+        title=(
+            "TIDAL Recommended Playlists" if recommended else "TIDAL Your Playlists"
+        )
+    )
+    t.add_column("#", style="white", justify="right")
+    t.add_column("Name", style="green")
+    t.add_column("URL", style="blue")
+    for i, p in enumerate(playlists):
+        name = escape(p.get("name", str(p.get("id"))))
+        url = p.get("url", "")
+        url_cell = f"[link={url}]{escape(url)}[/link]" if url else ""
+        t.add_row(f"{i:02}", name, url_cell)
+    console.print(t)
+
+
+@tidal.command("download")
+@click.option(
+    "--recommended",
+    is_flag=True,
+    help="Use recommended discovery playlists as the source list",
+)
+@click.option(
+    "-i",
+    "--indices",
+    help="Comma-separated indices to download from the printed list.",
+)
+@click.option(
+    "-n",
+    "--names",
+    help="Comma-separated exact playlist names to download.",
+)
+@click.option(
+    "-u",
+    "--urls",
+    help="Comma-separated playlist URLs to download.",
+)
+@click.pass_context
+@coro
+async def tidal_download(ctx, recommended, indices, names, urls):
+    """Download TIDAL playlists by index, name, or JSON/URL list.
+
+    Choose one or more of:
+      -i/--indices  Comma-separated indices from 'list-playlists'
+      -n/--names    Comma-separated exact playlist names
+      -u/--urls     Comma-separated playlist URLs
+
+    Examples:
+      rip tidal download -i "0,2,5"
+      rip tidal download -n "My Mix,Deep House Essentials"
+      rip tidal download -u "https://tidal.com/playlist/UUID"
+    """
+    chosen_urls: list[str] = []
+
+    # Direct URLs (fast path)
+    if urls:
+        chosen_urls.extend([u.strip() for u in urls.split(",") if u.strip()])
+
+    # Selection by indices or names requires fetching the list first
+    if indices or names:
+        with ctx.obj["config"] as cfg:
+            async with Main(cfg) as main:
+                client = await main.get_logged_in_client("tidal")
+                assert isinstance(client, TidalClient)
+                playlists = (
+                    await client.get_recommended_playlists()
+                    if recommended
+                    else await client.get_user_playlists()
+                )
+
+                if not playlists:
+                    console.print("[yellow]No playlists found.")
+                    return
+
+                if indices:
+                    idxs = [int(s.strip()) for s in indices.split(",") if s.strip()]
+                    for idx in idxs:
+                        if 0 <= idx < len(playlists):
+                            chosen_urls.append(playlists[idx]["url"])
+                        else:
+                            console.print(f"[red]Index out of range:[/red] {idx}")
+
+                if names:
+                    wanted = {s.strip() for s in names.split(",") if s.strip()}
+                    for p in playlists:
+                        if p.get("name") in wanted:
+                            chosen_urls.append(p["url"])
+
+    # De-duplicate while preserving order
+    seen = set()
+    filtered = []
+    for u in chosen_urls:
+        if u not in seen:
+            seen.add(u)
+            filtered.append(u)
+    chosen_urls = filtered
+
+    if not chosen_urls:
+        console.print("[yellow]No playlists selected to download.")
+        return
+
+    with ctx.obj["config"] as cfg:
+        async with Main(cfg) as main:
+            await main.add_all(chosen_urls)
             await main.resolve()
             await main.rip()
 
