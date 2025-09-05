@@ -121,7 +121,7 @@ class TrackMetadata:
     @classmethod
     def from_soundcloud(cls, album: AlbumMetadata, resp: dict) -> TrackMetadata:
         track = resp
-        track_id = track["id"]
+        track_id = str(track["id"])
         isrc = typed(safe_get(track, "publisher_metadata", "isrc"), str | None)
         bit_depth, sampling_rate = None, None
         explicit = typed(
