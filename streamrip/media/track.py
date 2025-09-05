@@ -104,10 +104,17 @@ class Track(Media):
         if c.truncate_to > 0 and len(track_path) > c.truncate_to:
             track_path = track_path[: c.truncate_to]
 
-        self.download_path = os.path.join(
-            self.folder,
-            f"{track_path}.{self.downloadable.extension}",
-        )
+        # Route singles into dedicated 'tracks' subfolder when the parent
+        # is the session downloads folder (i.e., not inside album/playlist)
+        parent = self.folder
+        session_root = self.config.session.downloads.folder
+        try:
+            if os.path.abspath(parent) == os.path.abspath(session_root):
+                parent = os.path.join(parent, "tracks")
+        except Exception:
+            pass
+
+        self.download_path = os.path.join(parent, f"{track_path}.{self.downloadable.extension}")
 
 
 @dataclass(slots=True)

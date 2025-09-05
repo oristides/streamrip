@@ -171,6 +171,8 @@ class PendingPlaylist(Pending):
             return None
         name = meta.name
         parent = self.config.session.downloads.folder
+        # Route playlists into a dedicated subfolder
+        parent = os.path.join(parent, "playlists")
         folder = os.path.join(parent, clean_filepath(name))
         tracks = [
             PendingPlaylistTrack(

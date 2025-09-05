@@ -110,6 +110,8 @@ class PendingAlbum(Pending):
         config = self.config.session
         if config.downloads.source_subdirectories:
             parent = os.path.join(parent, self.client.source.capitalize())
+        # Route albums into a dedicated subfolder
+        parent = os.path.join(parent, "albums")
         formatter = config.filepaths.folder_format
         folder = clean_filepath(
             meta.format_folder_path(formatter), config.filepaths.restrict_characters

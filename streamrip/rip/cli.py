@@ -181,7 +181,11 @@ def rip(
 @click.pass_context
 @coro
 async def url(ctx, urls):
-    """Download content from URLs."""
+    """Download content from URLs.
+
+    If a single URL is provided and it resolves to a playlist or album,
+    use 'rip show <url>' to preview track listings before downloading.
+    """
     if ctx.obj["config"] is None:
         return
 
@@ -222,6 +226,90 @@ async def url(ctx, urls):
 
         console.print(f"[red]SSL Certificate verification error: {e}[/red]")
         print_ssl_error_help()
+
+
+@rip.command()
+@click.argument("url", required=True)
+@click.pass_context
+@coro
+async def show(ctx, url):
+    """Show tracks for a playlist or album URL in a table.
+
+    Displays: index, track name, artist(s), and URL.
+    """
+    from rich.table import Table
+    from ..rip.parse_url import parse_url
+
+    with ctx.obj["config"] as cfg:
+        async with Main(cfg) as main:
+            parsed = parse_url(url)
+            if parsed is None:
+                console.print(f"[red]Unable to parse URL[/red] [cyan]{url}[/cyan]")
+                return
+
+            client = await main.get_logged_in_client(parsed.source)
+            # resolve without enqueuing for download
+            pending = await parsed.into_pending(client, cfg, main.database)
+
+            # Playlist
+            from ..media.playlist import PendingPlaylist
+            from ..media.album import PendingAlbum
+
+            if isinstance(pending, PendingPlaylist):
+                resolved = await pending.resolve()
+                if resolved is None:
+                    console.print("[yellow]Could not resolve playlist.")
+                    return
+                t = Table(title=f"Playlist: {resolved.name}")
+                t.add_column("#", style="white", justify="right")
+                t.add_column("Track", style="green")
+                t.add_column("Artist(s)", style="cyan")
+                t.add_column("URL", style="blue")
+                for i, p in enumerate(resolved.tracks, start=1):
+                    track_obj = await p.resolve()
+                    if track_obj is None:
+                        continue
+                    name = escape(track_obj.meta.title)
+                    artists = escape(
+                        ", ".join(a.name for a in track_obj.meta.artists)
+                    )
+                    track_url = f"https://{client.source}.com/track/{track_obj.meta.info.id}"
+                    t.add_row(
+                        f"{i:02}", name, artists, f"[link={track_url}]{track_url}[/link]"
+                    )
+                console.print(t)
+                return
+
+            # Album
+            if isinstance(pending, PendingAlbum):
+                resolved = await pending.resolve()
+                if resolved is None:
+                    console.print("[yellow]Could not resolve album.")
+                    return
+                t = Table(title=f"Album: {resolved.meta.album}")
+                t.add_column("#", style="white", justify="right")
+                t.add_column("Track", style="green")
+                t.add_column("Artist(s)", style="cyan")
+                t.add_column("URL", style="blue")
+                # pending tracks with tracknumbers
+                for i, p in enumerate(resolved.tracks, start=1):
+                    track_obj = await p.resolve()
+                    if track_obj is None:
+                        continue
+                    name = escape(track_obj.meta.title)
+                    artists = escape(
+                        ", ".join(a.name for a in track_obj.meta.artists)
+                    )
+                    track_url = f"https://{client.source}.com/track/{track_obj.meta.info.id}"
+                    t.add_row(
+                        f"{i:02}", name, artists, f"[link={track_url}]{track_url}[/link]"
+                    )
+                console.print(t)
+                return
+
+            console.print(
+                "[yellow]URL is not a playlist or album, or could not be displayed."
+            )
 
 
 @rip.command()
@@ -476,7 +564,7 @@ async def id(ctx, source, media_type, id):
 
 @rip.group()
 def tidal():
-    """TIDAL utilities: list and download playlists.
+    """TIDAL utilities: list and download playlists and albums.
 
     Commands:
       list-playlists  List your playlists (or discovery mixes with
@@ -484,6 +572,10 @@ def tidal():
                       name and URL.
       download        Download playlists by indices from the list,
                       by exact names, or by URLs.
+      list-albums     List your saved/owned albums and show an indexed
+                      table with name and URL.
+      download-albums Download albums by indices from the list, by exact
+                      names, or by URLs.
 
     Examples:
       rip tidal list-playlists
@@ -491,6 +583,9 @@ def tidal():
       rip tidal download -i "0,3"
       rip tidal download -n "My Mix,Deep House Essentials"
       rip tidal download -u "https://tidal.com/playlist/UUID"
+      rip tidal list-albums
+      rip tidal download-albums -i "0,2"
+      rip tidal download-albums -u "https://tidal.com/album/UUID"
     """
 
 
@@ -543,6 +638,94 @@ async def tidal_list_playlists(ctx, recommended):
         t.add_row(f"{i:02}", name, url_cell)
     console.print(t)
 
+
+@tidal.command("list-albums")
+@click.pass_context
+@coro
+async def tidal_list_albums(ctx):
+    """Print an indexed list of your saved/owned TIDAL albums."""
+    with ctx.obj["config"] as cfg:
+        async with Main(cfg) as main:
+            client = await main.get_logged_in_client("tidal")
+            assert isinstance(client, TidalClient)
+            albums = await client.get_user_albums()
+
+    if not albums:
+        console.print("[yellow]No albums found.")
+        return
+
+    from rich.table import Table
+
+    t = Table(title="TIDAL Your Albums")
+    t.add_column("#", style="white", justify="right")
+    t.add_column("Album", style="green")
+    t.add_column("Artist(s)", style="cyan")
+    t.add_column("URL", style="blue")
+    for i, a in enumerate(albums):
+        name = escape(a.get("name", str(a.get("id"))))
+        artists = escape(a.get("artists", ""))
+        url = a.get("url", "")
+        url_cell = f"[link={url}]{escape(url)}[/link]" if url else ""
+        t.add_row(f"{i:02}", name, artists, url_cell)
+    console.print(t)
+
+
+@tidal.command("download-albums")
+@click.option("-i", "--indices", help="Comma-separated indices to download from the printed list.")
+@click.option("-n", "--names", help="Comma-separated exact album names to download.")
+@click.option("-u", "--urls", help="Comma-separated album URLs to download.")
+@click.pass_context
+@coro
+async def tidal_download_albums(ctx, indices, names, urls):
+    """Download TIDAL albums by index, name, or URL list."""
+    chosen_urls: list[str] = []
+
+    if urls:
+        chosen_urls.extend([u.strip() for u in urls.split(",") if u.strip()])
+
+    if indices or names:
+        with ctx.obj["config"] as cfg:
+            async with Main(cfg) as main:
+                client = await main.get_logged_in_client("tidal")
+                assert isinstance(client, TidalClient)
+                albums = await client.get_user_albums()
+
+                if not albums:
+                    console.print("[yellow]No albums found.")
+                    return
+
+                if indices:
+                    idxs = [int(s.strip()) for s in indices.split(",") if s.strip()]
+                    for idx in idxs:
+                        if 0 <= idx < len(albums):
+                            chosen_urls.append(albums[idx]["url"])
+                        else:
+                            console.print(f"[red]Index out of range:[/red] {idx}")
+
+                if names:
+                    wanted = {s.strip() for s in names.split(",") if s.strip()}
+                    for a in albums:
+                        if a.get("name") in wanted:
+                            chosen_urls.append(a["url"])
+
+    # De-duplicate
+    seen = set()
+    filtered = []
+    for u in chosen_urls:
+        if u not in seen:
+            seen.add(u)
+            filtered.append(u)
+    chosen_urls = filtered
+
+    if not chosen_urls:
+        console.print("[yellow]No albums selected to download.")
+        return
+
+    with ctx.obj["config"] as cfg:
+        async with Main(cfg) as main:
+            await main.add_all(chosen_urls)
+            await main.resolve()
+            await main.rip()
 
 @tidal.command("download")
 @click.option(

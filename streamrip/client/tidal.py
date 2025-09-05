@@ -252,6 +252,53 @@ class TidalClient(Client):
 
         return playlists
 
+    async def get_user_albums(self) -> list[dict]:
+        """Return user's saved/owned albums with id, name, artists, and url.
+
+        Uses the v1 favorites endpoint with pagination to ensure full coverage.
+        """
+        user_id = self.config.user_id
+        albums: list[dict] = []
+
+        try:
+            offset = 0
+            while True:
+                resp = await self._api_request(
+                    f"users/{user_id}/favorites/albums", params={"offset": offset}
+                )
+                items = resp.get("items", [])
+                if not items:
+                    break
+
+                for p in items:
+                    album = p.get("item") or p
+                    aid = str(album.get("id"))
+                    if not aid:
+                        continue
+                    name = album.get("title") or album.get("name") or aid
+                    # artists can be a list under 'artists' or a single under 'artist'
+                    artist_names: list[str] = []
+                    if isinstance(album.get("artists"), list):
+                        artist_names = [a.get("name", "") for a in album["artists"]]
+                    elif isinstance(album.get("artist"), dict):
+                        artist_names = [album["artist"].get("name", "")]
+                    artists_joined = ", ".join([a for a in artist_names if a])
+
+                    albums.append(
+                        {
+                            "id": aid,
+                            "name": name,
+                            "artists": artists_joined,
+                            "url": f"https://tidal.com/album/{aid}",
+                        }
+                    )
+
+                offset += len(items)
+        except Exception as e:
+            logger.debug(f"Unable to retrieve v1 albums: {e}")
+
+        return albums
+
     async def search(self, media_type: str, query: str, limit: int = 100) -> list[dict]:
         """Search for a query.
 
