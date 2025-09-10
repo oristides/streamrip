@@ -110,6 +110,12 @@ class Track(Media):
         session_root = self.config.session.downloads.folder
         try:
             if os.path.abspath(parent) == os.path.abspath(session_root):
+                # Route singles by source
+                source_dir = (
+                    "soundcloud" if getattr(self.config, "session", None) and self.client.source == "soundcloud" else None
+                )
+                if source_dir:
+                    parent = os.path.join(parent, source_dir)
                 parent = os.path.join(parent, "tracks")
         except Exception:
             pass

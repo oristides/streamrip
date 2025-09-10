@@ -172,6 +172,8 @@ class PendingPlaylist(Pending):
         name = meta.name
         parent = self.config.session.downloads.folder
         # Route playlists into a dedicated subfolder
+        if self.client.source == "soundcloud":
+            parent = os.path.join(parent, "soundcloud")
         parent = os.path.join(parent, "playlists")
         folder = os.path.join(parent, clean_filepath(name))
         tracks = [
