@@ -78,12 +78,12 @@ class Main:
             enhanced_failed_db = db.Dummy()
 
         self.database = db.Database(
-            downloads_db, 
+            downloads_db,
             failed_downloads_db,
             enhanced_downloads_db,
             collections_db,
             track_collections_db,
-            enhanced_failed_db
+            enhanced_failed_db,
         )
 
     async def add(self, url: str):

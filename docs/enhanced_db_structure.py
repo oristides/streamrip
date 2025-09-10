@@ -64,12 +64,14 @@ TRACK_COLLECTIONS_STRUCTURE = {
     "collection_id": ["text", "not", "null"],
     "position": ["integer"],  # Position in playlist
     "added_date": ["text"],
-    "primary", "key": ["track_id", "collection_id"],
+    "primary_key": ["track_id", "collection_id"],
 }
+
 
 @dataclass
 class EnhancedTrackRecord:
     """Enhanced track record with full metadata"""
+
     id: str
     source: str
     title: str
@@ -90,9 +92,11 @@ class EnhancedTrackRecord:
     source_url: Optional[str] = None
     checksum: Optional[str] = None
 
+
 @dataclass
 class CollectionRecord:
     """Collection (playlist/album) record"""
+
     collection_id: str
     collection_type: str  # playlist, album, artist
     source: str
@@ -102,6 +106,7 @@ class CollectionRecord:
     last_synced: Optional[datetime] = None
     last_checked: Optional[datetime] = None
     is_recommended: bool = False
+
 
 # Benefits of Enhanced Structure:
 """

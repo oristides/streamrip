@@ -112,7 +112,10 @@ class Track(Media):
             if os.path.abspath(parent) == os.path.abspath(session_root):
                 # Route singles by source
                 source_dir = (
-                    "soundcloud" if getattr(self.config, "session", None) and self.client.source == "soundcloud" else None
+                    "soundcloud"
+                    if getattr(self.config, "session", None)
+                    and self.client.source == "soundcloud"
+                    else None
                 )
                 if source_dir:
                     parent = os.path.join(parent, source_dir)
@@ -120,7 +123,9 @@ class Track(Media):
         except Exception:
             pass
 
-        self.download_path = os.path.join(parent, f"{track_path}.{self.downloadable.extension}")
+        self.download_path = os.path.join(
+            parent, f"{track_path}.{self.downloadable.extension}"
+        )
 
 
 @dataclass(slots=True)

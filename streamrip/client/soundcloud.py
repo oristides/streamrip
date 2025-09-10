@@ -156,7 +156,9 @@ class SoundcloudClient(Client):
             # For playlists, we need to ensure tracks have full metadata
             # Fetch the full playlist with resolved tracks
             playlist_id = resp["id"]
-            print(f"🎯 DEBUG: Using LOCAL REPO VERSION - Processing playlist {playlist_id}")
+            print(
+                f"🎯 DEBUG: Using LOCAL REPO VERSION - Processing playlist {playlist_id}"
+            )
             full_playlist = await self._get_playlist(playlist_id)
             return full_playlist
 

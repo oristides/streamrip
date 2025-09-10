@@ -3,8 +3,8 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import sqlite3
+import subprocess
 from datetime import datetime
 from functools import wraps
 from typing import Any
@@ -15,21 +15,16 @@ import click
 from click_help_colors import HelpColorsGroup  # type: ignore
 from rich.logging import RichHandler
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.prompt import Confirm
 from rich.traceback import install
-from rich.markup import escape
 
 from .. import __version__, db
-from ..config import (
-    DEFAULT_CONFIG_PATH,
-    Config,
-    OutdatedConfigError,
-    set_user_defaults,
-)
+from ..client.tidal import TidalClient
+from ..config import DEFAULT_CONFIG_PATH, Config, OutdatedConfigError, set_user_defaults
 from ..console import console
 from ..utils.ssl_utils import get_aiohttp_connector_kwargs
 from .main import Main
-from ..client.tidal import TidalClient
 
 
 def coro(f):
@@ -256,6 +251,7 @@ async def show(ctx, url):
     Displays: index, track name, artist(s), and URL.
     """
     from rich.table import Table
+
     from ..rip.parse_url import parse_url
 
     with ctx.obj["config"] as cfg:
@@ -270,8 +266,8 @@ async def show(ctx, url):
             pending = await parsed.into_pending(client, cfg, main.database)
 
             # Playlist
-            from ..media.playlist import PendingPlaylist
             from ..media.album import PendingAlbum
+            from ..media.playlist import PendingPlaylist
 
             if isinstance(pending, PendingPlaylist):
                 resolved = await pending.resolve()
@@ -288,12 +284,15 @@ async def show(ctx, url):
                     if track_obj is None:
                         continue
                     name = escape(track_obj.meta.title)
-                    artists = escape(
-                        ", ".join(a.name for a in track_obj.meta.artists)
+                    artists = escape(", ".join(a.name for a in track_obj.meta.artists))
+                    track_url = (
+                        f"https://{client.source}.com/track/{track_obj.meta.info.id}"
                     )
-                    track_url = f"https://{client.source}.com/track/{track_obj.meta.info.id}"
                     t.add_row(
-                        f"{i:02}", name, artists, f"[link={track_url}]{track_url}[/link]"
+                        f"{i:02}",
+                        name,
+                        artists,
+                        f"[link={track_url}]{track_url}[/link]",
                     )
                 console.print(t)
                 return
@@ -315,12 +314,15 @@ async def show(ctx, url):
                     if track_obj is None:
                         continue
                     name = escape(track_obj.meta.title)
-                    artists = escape(
-                        ", ".join(a.name for a in track_obj.meta.artists)
+                    artists = escape(", ".join(a.name for a in track_obj.meta.artists))
+                    track_url = (
+                        f"https://{client.source}.com/track/{track_obj.meta.info.id}"
                     )
-                    track_url = f"https://{client.source}.com/track/{track_obj.meta.info.id}"
                     t.add_row(
-                        f"{i:02}", name, artists, f"[link={track_url}]{track_url}[/link]"
+                        f"{i:02}",
+                        name,
+                        artists,
+                        f"[link={track_url}]{track_url}[/link]",
                     )
                 console.print(t)
                 return
@@ -371,7 +373,7 @@ async def file(ctx, path):
                     if len(s) < len(items):
                         console.print(
                             (
-                                f"Found [orange]{len(items)-len(s)}[/orange] repeated"
+                                f"Found [orange]{len(items) - len(s)}[/orange] repeated"
                                 " URLs!"
                             )
                         )
@@ -545,8 +547,7 @@ async def search(ctx, first, output_file, num_results, source, media_type, query
     "-fs",
     "--fallback-source",
     help=(
-        "The source to search tracks on if no results were found with the main"
-        " source."
+        "The source to search tracks on if no results were found with the main source."
     ),
 )
 @click.argument("url", required=True)
@@ -621,9 +622,7 @@ def tidal():
 @click.option(
     "--recommended",
     is_flag=True,
-    help=(
-        "Show recommended discovery playlists instead of your saved/owned playlists"
-    ),
+    help=("Show recommended discovery playlists instead of your saved/owned playlists"),
 )
 @click.pass_context
 @coro
@@ -652,9 +651,7 @@ async def tidal_list_playlists(ctx, recommended):
     from rich.table import Table
 
     t = Table(
-        title=(
-            "TIDAL Recommended Playlists" if recommended else "TIDAL Your Playlists"
-        )
+        title=("TIDAL Recommended Playlists" if recommended else "TIDAL Your Playlists")
     )
     t.add_column("#", style="white", justify="right")
     t.add_column("Name", style="green")
@@ -693,7 +690,9 @@ async def tidal_list_albums(ctx, recommended):
 
     from rich.table import Table
 
-    t = Table(title=("TIDAL Recommended Albums" if recommended else "TIDAL Your Albums"))
+    t = Table(
+        title=("TIDAL Recommended Albums" if recommended else "TIDAL Your Albums")
+    )
     t.add_column("#", style="white", justify="right")
     t.add_column("Album", style="green")
     t.add_column("Artist(s)", style="cyan")
@@ -713,7 +712,9 @@ async def tidal_list_albums(ctx, recommended):
     is_flag=True,
     help="Use recommended albums as the source list",
 )
-@click.option("-i", "--indices", help="Comma-separated indices to download from the printed list.")
+@click.option(
+    "-i", "--indices", help="Comma-separated indices to download from the printed list."
+)
 @click.option("-n", "--names", help="Comma-separated exact album names to download.")
 @click.option("-u", "--urls", help="Comma-separated album URLs to download.")
 @click.pass_context
@@ -775,6 +776,7 @@ async def tidal_download_albums(ctx, recommended, indices, names, urls):
             await main.add_all(chosen_urls)
             await main.resolve()
             await main.rip()
+
 
 @tidal.command("download")
 @click.option(
@@ -872,27 +874,23 @@ async def tidal_download(ctx, recommended, indices, names, urls):
 @click.option(
     "--playlists",
     is_flag=True,
-    help="Download missing tracks from your TIDAL playlists"
+    help="Download missing tracks from your TIDAL playlists",
 )
 @click.option(
     "--albums",
     is_flag=True,
-    help="Download missing tracks from your TIDAL saved albums"
+    help="Download missing tracks from your TIDAL saved albums",
 )
 @click.option(
-    "--recommended",
-    is_flag=True,
-    help="Include recommended playlists/albums"
+    "--recommended", is_flag=True, help="Include recommended playlists/albums"
 )
 @click.option(
-    "--limit",
-    type=int,
-    help="Limit number of tracks to download (useful for testing)"
+    "--limit", type=int, help="Limit number of tracks to download (useful for testing)"
 )
 @click.pass_context
 def tidal_download_missing(ctx, playlists, albums, recommended, limit):
     """Download only missing tracks from your TIDAL collections.
-    
+
     Examples:
         rip tidal download-missing --playlists
         rip tidal download-missing --playlists --albums
@@ -906,13 +904,15 @@ def tidal_download_missing(ctx, playlists, albums, recommended, limit):
 
     # Get TidalClient and run comparison + download
     with ctx.obj["config"] as cfg:
-        from .main import Main
         import asyncio
-        
+
+        from .main import Main
+
         async def run_download():
             async with Main(cfg) as main:
                 client = await main.get_logged_in_client("tidal")
                 from ..client.tidal import TidalClient
+
                 assert isinstance(client, TidalClient)
 
                 # Get missing tracks
@@ -920,24 +920,28 @@ def tidal_download_missing(ctx, playlists, albums, recommended, limit):
                     playlists=playlists,
                     albums=albums,
                     recommended=recommended,
-                    db=main.database
+                    db=main.database,
                 )
 
                 if not missing_tracks:
-                    console.print("[green]🎉 No missing tracks found! You're all caught up.")
+                    console.print(
+                        "[green]🎉 No missing tracks found! You're all caught up."
+                    )
                     return
 
                 if limit:
                     missing_tracks = missing_tracks[:limit]
                     console.print(f"[yellow]Limited to first {limit} missing tracks")
 
-                console.print(f"[green]Found {len(missing_tracks)} missing tracks to download")
-                
+                console.print(
+                    f"[green]Found {len(missing_tracks)} missing tracks to download"
+                )
+
                 if click.confirm(f"Download {len(missing_tracks)} missing tracks?"):
                     await _download_track_list(missing_tracks, main)
                 else:
                     console.print("[yellow]Download cancelled")
-        
+
         # Run the async function
         asyncio.run(run_download())
 
@@ -945,11 +949,11 @@ def tidal_download_missing(ctx, playlists, albums, recommended, limit):
 async def _download_track_list(track_urls, main):
     """Download a list of track URLs."""
     console.print(f"[blue]📥 Downloading {len(track_urls)} tracks...")
-    
+
     await main.add_all(track_urls)
     await main.resolve()
     await main.rip()
-    
+
     console.print("[green]✅ Download completed!")
 
 
@@ -957,31 +961,30 @@ async def _download_track_list(track_urls, main):
 @click.option(
     "--playlists",
     is_flag=True,
-    help="Compare downloaded tracks with your TIDAL playlists"
+    help="Compare downloaded tracks with your TIDAL playlists",
 )
 @click.option(
     "--albums",
     is_flag=True,
-    help="Compare downloaded tracks with your TIDAL saved albums"
+    help="Compare downloaded tracks with your TIDAL saved albums",
 )
 @click.option(
     "--recommended",
     is_flag=True,
-    help="Include recommended playlists/albums in comparison"
+    help="Include recommended playlists/albums in comparison",
 )
 @click.option(
     "--missing-only",
     is_flag=True,
-    help="Show only missing tracks (not already downloaded)"
+    help="Show only missing tracks (not already downloaded)",
 )
 @click.option(
     "--download-missing",
     is_flag=True,
-    help="Automatically download missing tracks after comparison"
+    help="Automatically download missing tracks after comparison",
 )
 @click.pass_context
-def tidal_compare(ctx, playlists, albums, recommended, missing_only,
-                  download_missing):
+def tidal_compare(ctx, playlists, albums, recommended, missing_only, download_missing):
     """Compare your TIDAL collections with downloaded files to find missing tracks.
 
     Examples:
@@ -997,13 +1000,15 @@ def tidal_compare(ctx, playlists, albums, recommended, missing_only,
 
     # Get TidalClient and run comparison
     with ctx.obj["config"] as cfg:
-        from .main import Main
         import asyncio
-        
+
+        from .main import Main
+
         async def run_comparison():
             async with Main(cfg) as main:
                 client = await main.get_logged_in_client("tidal")
                 from ..client.tidal import TidalClient
+
                 assert isinstance(client, TidalClient)
 
                 # Run the comparison
@@ -1012,19 +1017,25 @@ def tidal_compare(ctx, playlists, albums, recommended, missing_only,
                     albums=albums,
                     recommended=recommended,
                     missing_only=missing_only,
-                    db=main.database
+                    db=main.database,
                 )
 
                 # If download_missing is requested, offer to download missing tracks
                 if download_missing:
-                    total_missing = sum(data['missing_tracks'] for data in results.values())
+                    total_missing = sum(
+                        data["missing_tracks"] for data in results.values()
+                    )
                     if total_missing > 0:
                         console.print(f"\n[green]Found {total_missing} missing tracks.")
-                        if click.confirm("Would you like to download the missing tracks?"):
+                        if click.confirm(
+                            "Would you like to download the missing tracks?"
+                        ):
                             await _download_missing_tracks(client, results, cfg)
                     else:
-                        console.print("[green]🎉 No missing tracks found! You're all caught up.")
-        
+                        console.print(
+                            "[green]🎉 No missing tracks found! You're all caught up."
+                        )
+
         # Run the async function
         asyncio.run(run_comparison())
 
@@ -1039,8 +1050,8 @@ async def _download_missing_tracks(client, results, config):
 
     # Collect all missing track URLs
     for collection_type, data in results.items():
-        for track in data['missing']:
-            track_id = track.get('id')
+        for track in data["missing"]:
+            track_id = track.get("id")
             if track_id:
                 urls_to_download.append(f"https://tidal.com/track/{track_id}")
 
@@ -1102,47 +1113,45 @@ def database_status(ctx):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
         migration = db.DatabaseMigration(db_path)
-        
+
         console.print("[blue]🔍 Checking database status...")
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist yet")
             return
-            
+
         if migration.needs_migration():
             console.print("[yellow]⚠️  Database needs migration to enhanced structure")
             console.print("[blue]Run 'rip database migrate' to upgrade your database")
         else:
             console.print("[green]✅ Database is up to date with enhanced structure")
-            
+
         # Show some stats
         with sqlite3.connect(db_path) as conn:
             try:
                 old_count = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
                 console.print(f"[blue]📊 Old format tracks: {old_count}")
-            except:
+            except Exception:
                 pass
-                
+
             try:
-                new_count = conn.execute("SELECT COUNT(*) FROM downloads_enhanced").fetchone()[0]
+                new_count = conn.execute(
+                    "SELECT COUNT(*) FROM downloads_enhanced"
+                ).fetchone()[0]
                 console.print(f"[blue]📊 Enhanced format tracks: {new_count}")
-            except:
+            except Exception:
                 pass
 
 
 @database.command("migrate")
 @click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be migrated without making changes"
+    "--dry-run", is_flag=True, help="Show what would be migrated without making changes"
 )
 @click.option(
-    "--force",
-    is_flag=True,
-    help="Force migration even if already up to date"
+    "--force", is_flag=True, help="Force migration even if already up to date"
 )
 @click.pass_context
 def database_migrate(ctx, dry_run, force):
@@ -1151,30 +1160,30 @@ def database_migrate(ctx, dry_run, force):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
         migration = db.DatabaseMigration(db_path)
-        
+
         console.print("[blue]🔄 Database Migration")
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist yet")
             return
-            
+
         if not migration.needs_migration() and not force:
             console.print("[green]✅ Database is already up to date")
             return
-            
+
         if dry_run:
             console.print("[blue]🔍 Dry run - no changes will be made")
             console.print("[blue]Would migrate database to enhanced structure")
             return
-            
+
         console.print("[blue]📦 Creating backup...")
         if not migration.backup_database():
             console.print("[red]❌ Failed to create backup. Migration aborted.")
             return
-            
+
         console.print("[blue]🔄 Migrating database...")
         if migration.migrate_database():
             console.print("[green]✅ Migration completed successfully!")
@@ -1191,27 +1200,29 @@ def database_rollback(ctx):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         # Find backup files
         backup_files = []
         for file in os.listdir(os.path.dirname(db_path)):
             if file.startswith(os.path.basename(db_path) + ".backup_"):
                 backup_files.append(os.path.join(os.path.dirname(db_path), file))
-                
+
         if not backup_files:
             console.print("[yellow]No backup files found")
             return
-            
+
         # Sort by modification time (newest first)
         backup_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        
+
         console.print("[blue]📋 Available backups:")
         for i, backup in enumerate(backup_files[:5]):  # Show last 5 backups
             mtime = datetime.fromtimestamp(os.path.getmtime(backup))
-            console.print(f"[blue]{i+1}. {os.path.basename(backup)} ({mtime.strftime('%Y-%m-%d %H:%M:%S')})")
-            
+            console.print(
+                f"[blue]{i + 1}. {os.path.basename(backup)} ({mtime.strftime('%Y-%m-%d %H:%M:%S')})"
+            )
+
         if click.confirm("Rollback to most recent backup?"):
             try:
                 shutil.copy2(backup_files[0], db_path)
@@ -1228,36 +1239,46 @@ def database_verify(ctx):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist")
             return
-            
+
         console.print("[blue]🔍 Verifying database integrity...")
-        
+
         with sqlite3.connect(db_path) as conn:
             # Check old vs new counts
             try:
                 old_count = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
-                new_count = conn.execute("SELECT COUNT(*) FROM downloads_enhanced").fetchone()[0]
-                
+                new_count = conn.execute(
+                    "SELECT COUNT(*) FROM downloads_enhanced"
+                ).fetchone()[0]
+
                 if old_count == new_count:
                     console.print(f"[green]✅ Download counts match: {old_count}")
                 else:
-                    console.print(f"[red]❌ Download count mismatch: {old_count} vs {new_count}")
-                    
+                    console.print(
+                        f"[red]❌ Download count mismatch: {old_count} vs {new_count}"
+                    )
+
             except Exception as e:
                 console.print(f"[red]❌ Error checking counts: {e}")
-                
+
             # Check table structure
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
-            
-            required_tables = ['downloads', 'downloads_enhanced', 'collections', 'track_collections', 'failed_downloads_enhanced']
+
+            required_tables = [
+                "downloads",
+                "downloads_enhanced",
+                "collections",
+                "track_collections",
+                "failed_downloads_enhanced",
+            ]
             missing_tables = [t for t in required_tables if t not in tables]
-            
+
             if missing_tables:
                 console.print(f"[red]❌ Missing tables: {missing_tables}")
             else:
@@ -1265,11 +1286,7 @@ def database_verify(ctx):
 
 
 @database.command("cleanup")
-@click.option(
-    "--confirm",
-    is_flag=True,
-    help="Skip confirmation prompt"
-)
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def database_cleanup(ctx, confirm):
     """Clean up old database tables after successful migration."""
@@ -1277,35 +1294,41 @@ def database_cleanup(ctx, confirm):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist")
             return
-            
+
         console.print("[yellow]⚠️  WARNING: This will remove old database tables!")
-        console.print("[blue]This should only be done after verifying migration is complete.")
-        
-        if not confirm and not click.confirm("Are you sure you want to cleanup old tables?"):
+        console.print(
+            "[blue]This should only be done after verifying migration is complete."
+        )
+
+        if not confirm and not click.confirm(
+            "Are you sure you want to cleanup old tables?"
+        ):
             console.print("[yellow]Cleanup cancelled")
             return
-            
+
         try:
             with sqlite3.connect(db_path) as conn:
                 # Check if enhanced tables have data
-                enhanced_count = conn.execute("SELECT COUNT(*) FROM downloads_enhanced").fetchone()[0]
+                enhanced_count = conn.execute(
+                    "SELECT COUNT(*) FROM downloads_enhanced"
+                ).fetchone()[0]
                 if enhanced_count == 0:
                     console.print("[red]❌ Enhanced tables are empty. Cleanup aborted.")
                     return
-                    
+
                 # Drop old tables
                 conn.execute("DROP TABLE IF EXISTS downloads")
                 conn.execute("DROP TABLE IF EXISTS failed_downloads")
-                
+
                 console.print("[green]✅ Old tables cleaned up successfully")
                 console.print("[blue]💡 You can now use enhanced database features")
-                
+
         except Exception as e:
             console.print(f"[red]❌ Cleanup failed: {e}")
 
@@ -1313,18 +1336,12 @@ def database_cleanup(ctx, confirm):
 @database.command("inspect")
 @click.option(
     "--table",
-    help="Specific table to inspect (downloads_enhanced, collections, track_collections, failed_downloads_enhanced)"
+    help="Specific table to inspect (downloads_enhanced, collections, track_collections, failed_downloads_enhanced)",
 )
 @click.option(
-    "--limit",
-    type=int,
-    default=10,
-    help="Number of rows to show (default: 10)"
+    "--limit", type=int, default=10, help="Number of rows to show (default: 10)"
 )
-@click.option(
-    "--columns",
-    help="Specific columns to show (comma-separated)"
-)
+@click.option("--columns", help="Specific columns to show (comma-separated)")
 @click.pass_context
 def database_inspect(ctx, table, limit, columns):
     """Inspect database tables and their contents."""
@@ -1332,20 +1349,20 @@ def database_inspect(ctx, table, limit, columns):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist")
             return
-            
+
         console.print("[blue]🔍 Database Inspector")
-        
+
         with sqlite3.connect(db_path) as conn:
             # Get all tables
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             all_tables = [row[0] for row in cursor.fetchall()]
-            
+
             if table:
                 tables_to_show = [table] if table in all_tables else []
                 if not tables_to_show:
@@ -1354,60 +1371,73 @@ def database_inspect(ctx, table, limit, columns):
                     return
             else:
                 tables_to_show = all_tables
-            
+
             for table_name in tables_to_show:
                 console.print(f"\n[bold blue]📋 Table: {table_name}[/bold blue]")
-                
+
                 # Get table schema
                 cursor = conn.execute(f"PRAGMA table_info({table_name})")
                 schema = cursor.fetchall()
-                
+
                 if schema:
                     console.print("[dim]Schema:[/dim]")
                     for col in schema:
                         col_name, col_type = col[1], col[2]
                         nullable = "NULL" if col[3] == 0 else "NOT NULL"
-                        console.print(f"  [dim]{col_name}: {col_type} ({nullable})[/dim]")
-                
+                        console.print(
+                            f"  [dim]{col_name}: {col_type} ({nullable})[/dim]"
+                        )
+
                 # Get row count
                 cursor = conn.execute(f"SELECT COUNT(*) FROM {table_name}")
                 count = cursor.fetchone()[0]
                 console.print(f"[blue]Rows: {count}")
-                
+
                 if count > 0:
                     # Show sample data
                     if columns:
-                        col_list = [col.strip() for col in columns.split(',')]
+                        col_list = [col.strip() for col in columns.split(",")]
                         # Validate columns exist
                         valid_cols = [col[1] for col in schema]
-                        invalid_cols = [col for col in col_list if col not in valid_cols]
+                        invalid_cols = [
+                            col for col in col_list if col not in valid_cols
+                        ]
                         if invalid_cols:
                             console.print(f"[red]❌ Invalid columns: {invalid_cols}")
-                            console.print(f"[blue]Valid columns: {', '.join(valid_cols)}")
+                            console.print(
+                                f"[blue]Valid columns: {', '.join(valid_cols)}"
+                            )
                             continue
-                        select_cols = ', '.join(col_list)
+                        select_cols = ", ".join(col_list)
                     else:
-                        select_cols = '*'
-                    
-                    cursor = conn.execute(f"SELECT {select_cols} FROM {table_name} LIMIT {limit}")
+                        select_cols = "*"
+
+                    cursor = conn.execute(
+                        f"SELECT {select_cols} FROM {table_name} LIMIT {limit}"
+                    )
                     rows = cursor.fetchall()
-                    
+
                     if rows:
-                        console.print(f"[blue]Sample data (first {len(rows)} rows):[/blue]")
-                        
+                        console.print(
+                            f"[blue]Sample data (first {len(rows)} rows):[/blue]"
+                        )
+
                         # Get column names
                         if columns:
-                            col_names = [col.strip() for col in columns.split(',')]
+                            col_names = [col.strip() for col in columns.split(",")]
                         else:
                             col_names = [col[1] for col in schema]
-                        
+
                         # Create table
                         from rich.table import Table
-                        sample_table = Table(show_header=True, header_style="bold magenta")
-                        
+
+                        sample_table = Table(
+                            show_header=True, header_style="bold magenta"
+                        )
+
                         for col_name in col_names:
                             sample_table.add_column(col_name, overflow="fold")
-                        
+
                         for row in rows:
                             # Truncate long values for display
                             display_row = []
@@ -1419,11 +1449,13 @@ def database_inspect(ctx, table, limit, columns):
                                 else:
                                     display_row.append(str(val))
                             sample_table.add_row(*display_row)
-                        
+
                         console.print(sample_table)
-                        
+
                         if count > limit:
-                            console.print(f"[dim]... and {count - limit} more rows[/dim]")
+                            console.print(
+                                f"[dim]... and {count - limit} more rows[/dim]"
+                            )
 
 
 @database.command("query")
@@ -1435,31 +1467,32 @@ def database_query(ctx, sql):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist")
             return
-            
+
         console.print(f"[blue]🔍 Executing SQL: {sql}[/blue]")
-        
+
         try:
             with sqlite3.connect(db_path) as conn:
                 cursor = conn.execute(sql)
                 rows = cursor.fetchall()
-                
+
                 if rows:
                     # Get column names
                     col_names = [description[0] for description in cursor.description]
-                    
+
                     # Create table
                     from rich.table import Table
+
                     result_table = Table(show_header=True, header_style="bold magenta")
-                    
+
                     for col_name in col_names:
                         result_table.add_column(col_name, overflow="fold")
-                    
+
                     for row in rows:
                         display_row = []
                         for val in row:
@@ -1470,30 +1503,25 @@ def database_query(ctx, sql):
                             else:
                                 display_row.append(str(val))
                         result_table.add_row(*display_row)
-                    
+
                     console.print(result_table)
                     console.print(f"[blue]Found {len(rows)} rows[/blue]")
                 else:
                     console.print("[yellow]No results found")
-                    
+
         except Exception as e:
             console.print(f"[red]❌ Query failed: {e}")
 
 
 @database.command("backfill")
 @click.option(
-    "--scan-path",
-    help="Path to scan for music files (default: downloads folder)"
+    "--scan-path", help="Path to scan for music files (default: downloads folder)"
 )
 @click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be updated without making changes"
+    "--dry-run", is_flag=True, help="Show what would be updated without making changes"
 )
 @click.option(
-    "--limit",
-    type=int,
-    help="Limit number of files to process (for testing)"
+    "--limit", type=int, help="Limit number of files to process (for testing)"
 )
 @click.pass_context
 def database_backfill(ctx, scan_path, dry_run, limit):
@@ -1502,86 +1530,125 @@ def database_backfill(ctx, scan_path, dry_run, limit):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist")
             return
-            
+
         # Determine scan path
         if scan_path:
             music_path = scan_path
         else:
             music_path = cfg.session.downloads.folder
-            
+
         if not os.path.exists(music_path):
             console.print(f"[yellow]Music path does not exist: {music_path}")
             return
-            
+
         console.print(f"[blue]🔍 Scanning music files in: {music_path}[/blue]")
-        
+
         if dry_run:
             console.print("[blue]🔍 Dry run - no changes will be made[/blue]")
-        
+
         # Import mutagen for metadata extraction
         try:
             from mutagen import File as MutagenFile
-            from mutagen.id3 import ID3NoHeaderError
         except ImportError:
-            console.print("[red]❌ mutagen library not found. Install with: pip install mutagen[/red]")
+            console.print(
+                "[red]❌ mutagen library not found. Install with: pip install mutagen[/red]"
+            )
             return
-        
+
         # Find music files
-        music_extensions = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav'}
+        music_extensions = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
         music_files = []
-        
+
         for root, dirs, files in os.walk(music_path):
             for file in files:
                 if any(file.lower().endswith(ext) for ext in music_extensions):
                     music_files.append(os.path.join(root, file))
-        
+
         if not music_files:
             console.print("[yellow]No music files found[/yellow]")
             return
-            
+
         console.print(f"[blue]Found {len(music_files)} music files[/blue]")
-        
+
         if limit:
             music_files = music_files[:limit]
             console.print(f"[blue]Limited to first {limit} files[/blue]")
-        
+
         # Process files
         updated_count = 0
         skipped_count = 0
         error_count = 0
-        
+
         with sqlite3.connect(db_path) as conn:
             for i, file_path in enumerate(music_files, 1):
                 try:
-                    console.print(f"[blue]Processing {i}/{len(music_files)}: {os.path.basename(file_path)}[/blue]")
-                    
+                    console.print(
+                        f"[blue]Processing {i}/{len(music_files)}: {os.path.basename(file_path)}[/blue]"
+                    )
+
                     # Extract metadata
                     audio_file = MutagenFile(file_path)
                     if audio_file is None:
-                        console.print(f"[yellow]  ⚠️  Could not read metadata[/yellow]")
+                        console.print("[yellow]  ⚠️  Could not read metadata[/yellow]")
                         skipped_count += 1
                         continue
-                    
+
                     # Extract metadata fields
-                    title = audio_file.get('title', ['Unknown'])[0] if audio_file.get('title') else 'Unknown'
-                    artist = audio_file.get('artist', ['Unknown'])[0] if audio_file.get('artist') else 'Unknown'
-                    album = audio_file.get('album', [None])[0] if audio_file.get('album') else None
-                    album_artist = audio_file.get('albumartist', [None])[0] if audio_file.get('albumartist') else None
-                    track_number = audio_file.get('tracknumber', [None])[0] if audio_file.get('tracknumber') else None
-                    disc_number = audio_file.get('discnumber', [None])[0] if audio_file.get('discnumber') else None
-                    year = audio_file.get('date', [None])[0] if audio_file.get('date') else None
-                    genre = audio_file.get('genre', [None])[0] if audio_file.get('genre') else None
-                    duration = int(audio_file.info.length) if hasattr(audio_file, 'info') and audio_file.info.length else None
-                    
+                    title = (
+                        audio_file.get("title", ["Unknown"])[0]
+                        if audio_file.get("title")
+                        else "Unknown"
+                    )
+                    artist = (
+                        audio_file.get("artist", ["Unknown"])[0]
+                        if audio_file.get("artist")
+                        else "Unknown"
+                    )
+                    album = (
+                        audio_file.get("album", [None])[0]
+                        if audio_file.get("album")
+                        else None
+                    )
+                    album_artist = (
+                        audio_file.get("albumartist", [None])[0]
+                        if audio_file.get("albumartist")
+                        else None
+                    )
+                    track_number = (
+                        audio_file.get("tracknumber", [None])[0]
+                        if audio_file.get("tracknumber")
+                        else None
+                    )
+                    disc_number = (
+                        audio_file.get("discnumber", [None])[0]
+                        if audio_file.get("discnumber")
+                        else None
+                    )
+                    year = (
+                        audio_file.get("date", [None])[0]
+                        if audio_file.get("date")
+                        else None
+                    )
+                    genre = (
+                        audio_file.get("genre", [None])[0]
+                        if audio_file.get("genre")
+                        else None
+                    )
+                    duration = (
+                        int(audio_file.info.length)
+                        if hasattr(audio_file, "info") and audio_file.info.length
+                        else None
+                    )
+
                     # Determine quality based on file format and bitrate
                     quality = "Unknown"
-                    if hasattr(audio_file, 'info'):
+                    if hasattr(audio_file, "info"):
                         if audio_file.info.bitrate:
                             if audio_file.info.bitrate >= 320:
                                 quality = "HIGH"
@@ -1589,7 +1656,7 @@ def database_backfill(ctx, scan_path, dry_run, limit):
                                 quality = "MEDIUM"
                             else:
                                 quality = "LOW"
-                    
+
                     # Determine source based on file path
                     source = "unknown"
                     if "tidal" in file_path.lower():
@@ -1600,59 +1667,79 @@ def database_backfill(ctx, scan_path, dry_run, limit):
                         source = "deezer"
                     elif "soundcloud" in file_path.lower():
                         source = "soundcloud"
-                    
+
                     # Get file size
                     file_size = os.path.getsize(file_path)
-                    
+
                     # Try to find matching track in database by file path or similar metadata
                     # For now, we'll update tracks with "Unknown Track" title
-                    cursor = conn.execute("""
-                        SELECT id FROM downloads_enhanced 
+                    cursor = conn.execute(
+                        """
+                        SELECT id FROM downloads_enhanced
                         WHERE title = 'Unknown Track' AND file_path = 'unknown'
                         LIMIT 1
-                    """)
-                    
+                    """
+                    )
+
                     track_id = cursor.fetchone()
                     if track_id:
                         track_id = track_id[0]
-                        
+
                         if not dry_run:
                             # Update the record
-                            conn.execute("""
+                            conn.execute(
+                                """
                                 UPDATE downloads_enhanced SET
                                     source = ?, title = ?, artist = ?, album = ?,
                                     album_artist = ?, track_number = ?, disc_number = ?,
                                     year = ?, genre = ?, duration = ?, quality = ?,
                                     file_path = ?, file_size = ?
                                 WHERE id = ?
-                            """, (
-                                source, title, artist, album, album_artist,
-                                track_number, disc_number, year, genre,
-                                duration, quality, file_path, file_size, track_id
-                            ))
-                        
-                        console.print(f"[green]  ✅ Updated: {title} - {artist}[/green]")
+                            """,
+                                (
+                                    source,
+                                    title,
+                                    artist,
+                                    album,
+                                    album_artist,
+                                    track_number,
+                                    disc_number,
+                                    year,
+                                    genre,
+                                    duration,
+                                    quality,
+                                    file_path,
+                                    file_size,
+                                    track_id,
+                                ),
+                            )
+
+                        console.print(
+                            f"[green]  ✅ Updated: {title} - {artist}[/green]"
+                        )
                         updated_count += 1
                     else:
-                        console.print(f"[yellow]  ⚠️  No matching track found in database[/yellow]")
+                        console.print(
+                            "[yellow]  ⚠️  No matching track found in database[/yellow]"
+                        )
                         skipped_count += 1
-                        
+
                 except Exception as e:
                     console.print(f"[red]  ❌ Error processing {file_path}: {e}[/red]")
                     error_count += 1
                     continue
-        
+
         # Commit changes
         if not dry_run:
             conn.commit()
-        
-        console.print(f"\n[blue]📊 Backfill Summary:[/blue]")
+
+        console.print("\n[blue]📊 Backfill Summary:[/blue]")
         console.print(f"[green]  ✅ Updated: {updated_count}[/green]")
         console.print(f"[yellow]  ⚠️  Skipped: {skipped_count}[/yellow]")
         console.print(f"[red]  ❌ Errors: {error_count}[/red]")
-        
+
         if dry_run:
-            console.print(f"[blue]💡 Run without --dry-run to apply changes[/blue]")
+            console.print("[blue]💡 Run without --dry-run to apply changes[/blue]")
 
 
 @database.command("stats")
@@ -1663,83 +1750,97 @@ def database_stats(ctx):
         if not cfg.session.database.downloads_enabled:
             console.print("[yellow]Database is disabled in configuration")
             return
-            
+
         db_path = cfg.session.database.downloads_path
-        
+
         if not os.path.exists(db_path):
             console.print("[yellow]Database file does not exist")
             return
-            
+
         console.print("[blue]📊 Database Statistics[/blue]")
-        
+
         with sqlite3.connect(db_path) as conn:
             # Table overview
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
-            
+
             console.print(f"\n[bold]📋 Tables ({len(tables)}):[/bold]")
             for table in tables:
                 cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
                 count = cursor.fetchone()[0]
                 console.print(f"  [blue]{table}:[/blue] {count} rows")
-            
+
             # Enhanced downloads stats
-            if 'downloads_enhanced' in tables:
-                console.print(f"\n[bold]🎵 Enhanced Downloads Analysis:[/bold]")
-                
+            if "downloads_enhanced" in tables:
+                console.print("\n[bold]🎵 Enhanced Downloads Analysis:[/bold]")
+
                 # Sources
-                cursor = conn.execute("SELECT source, COUNT(*) FROM downloads_enhanced GROUP BY source")
+                cursor = conn.execute(
+                    "SELECT source, COUNT(*) FROM downloads_enhanced GROUP BY source"
+                )
                 sources = cursor.fetchall()
                 if sources:
                     console.print("  [blue]By Source:[/blue]")
                     for source, count in sources:
                         console.print(f"    {source}: {count}")
-                
+
                 # Quality distribution
-                cursor = conn.execute("SELECT quality, COUNT(*) FROM downloads_enhanced WHERE quality IS NOT NULL GROUP BY quality")
+                cursor = conn.execute(
+                    "SELECT quality, COUNT(*) FROM downloads_enhanced WHERE quality IS NOT NULL GROUP BY quality"
+                )
                 qualities = cursor.fetchall()
                 if qualities:
                     console.print("  [blue]By Quality:[/blue]")
                     for quality, count in qualities:
                         console.print(f"    {quality}: {count}")
-                
+
                 # Recent downloads
-                cursor = conn.execute("""
-                    SELECT COUNT(*) FROM downloads_enhanced 
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM downloads_enhanced
                     WHERE download_date >= date('now', '-7 days')
-                """)
+                """
+                )
                 recent = cursor.fetchone()[0]
                 console.print(f"  [blue]Downloads last 7 days:[/blue] {recent}")
-            
+
             # Collections stats
-            if 'collections' in tables:
-                cursor = conn.execute("SELECT collection_type, COUNT(*) FROM collections GROUP BY collection_type")
+            if "collections" in tables:
+                cursor = conn.execute(
+                    "SELECT collection_type, COUNT(*) FROM collections GROUP BY collection_type"
+                )
                 collection_types = cursor.fetchall()
                 if collection_types:
-                    console.print(f"\n[bold]📋 Collections Analysis:[/bold]")
+                    console.print("\n[bold]📋 Collections Analysis:[/bold]")
                     for col_type, count in collection_types:
                         console.print(f"  [blue]{col_type}:[/blue] {count}")
-            
+
             # File size stats
-            if 'downloads_enhanced' in tables:
-                cursor = conn.execute("""
-                    SELECT 
+            if "downloads_enhanced" in tables:
+                cursor = conn.execute(
+                    """
+                    SELECT
                         COUNT(*) as total_files,
                         SUM(file_size) as total_size,
                         AVG(file_size) as avg_size,
                         MIN(file_size) as min_size,
                         MAX(file_size) as max_size
-                    FROM downloads_enhanced 
+                    FROM downloads_enhanced
                     WHERE file_size IS NOT NULL
-                """)
+                """
+                )
                 size_stats = cursor.fetchone()
                 if size_stats and size_stats[0] > 0:
                     total_files, total_size, avg_size, min_size, max_size = size_stats
-                    console.print(f"\n[bold]💾 File Size Statistics:[/bold]")
+                    console.print("\n[bold]💾 File Size Statistics:[/bold]")
                     console.print(f"  [blue]Total files:[/blue] {total_files}")
-                    console.print(f"  [blue]Total size:[/blue] {total_size:,} bytes ({total_size/1024/1024/1024:.2f} GB)")
+                    console.print(
+                        f"  [blue]Total size:[/blue] {total_size:,} bytes ({total_size / 1024 / 1024 / 1024:.2f} GB)"
+                    )
                     console.print(f"  [blue]Average size:[/blue] {avg_size:,.0f} bytes")
-                    console.print(f"  [blue]Size range:[/blue] {min_size:,} - {max_size:,} bytes")
+                    console.print(
+                        f"  [blue]Size range:[/blue] {min_size:,} - {max_size:,} bytes"
+                    )
 
 
 if __name__ == "__main__":

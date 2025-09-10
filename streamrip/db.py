@@ -2,12 +2,12 @@
 
 import logging
 import os
-import sqlite3
 import shutil
+import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Optional, List
+from typing import Final, List, Optional
 
 logger = logging.getLogger("streamrip")
 
@@ -183,7 +183,7 @@ class Failed(DatabaseBase):
 # Enhanced Database Classes for Migration
 class EnhancedDownloads(DatabaseBase):
     """Enhanced downloads table with full metadata."""
-    
+
     name = "downloads_enhanced"
     structure: Final[dict] = {
         "id": ["text", "primary", "key"],
@@ -210,7 +210,7 @@ class EnhancedDownloads(DatabaseBase):
 
 class Collections(DatabaseBase):
     """Table for tracking playlists and albums."""
-    
+
     name = "collections"
     structure: Final[dict] = {
         "collection_id": ["text", "primary", "key"],
@@ -227,7 +227,7 @@ class Collections(DatabaseBase):
 
 class TrackCollections(DatabaseBase):
     """Many-to-many relationship between tracks and collections."""
-    
+
     name = "track_collections"
     structure: Final[dict] = {
         "track_id": ["text"],
@@ -240,7 +240,7 @@ class TrackCollections(DatabaseBase):
 
 class EnhancedFailed(DatabaseBase):
     """Enhanced failed downloads table."""
-    
+
     name = "failed_downloads_enhanced"
     structure: Final[dict] = {
         "id": ["text", "primary", "key"],
@@ -257,29 +257,33 @@ class EnhancedFailed(DatabaseBase):
 
 class DatabaseMigration:
     """Handles safe migration from old database structure to new enhanced structure."""
-    
+
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.backup_path = f"{db_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
+        self.backup_path = (
+            f"{db_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+
     def needs_migration(self) -> bool:
         """Check if database needs migration to enhanced structure."""
         if not os.path.exists(self.db_path):
             return False
-            
+
         with sqlite3.connect(self.db_path) as conn:
             # Check if old structure exists
-            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='downloads'")
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='downloads'"
+            )
             if not cursor.fetchone():
                 return False
-                
+
             # Check if new enhanced structure exists
             cursor = conn.execute("PRAGMA table_info(downloads)")
             columns = [row[1] for row in cursor.fetchall()]
-            
+
             # If only has 'id' column, needs migration
-            return len(columns) == 1 and 'id' in columns
-    
+            return len(columns) == 1 and "id" in columns
+
     def backup_database(self) -> bool:
         """Create backup of current database."""
         try:
@@ -289,24 +293,24 @@ class DatabaseMigration:
         except Exception as e:
             logger.error(f"Failed to backup database: {e}")
             return False
-    
+
     def migrate_database(self) -> bool:
         """Perform the migration from old to new structure."""
         if not self.needs_migration():
             logger.info("Database already up to date")
             return True
-            
+
         if not self.backup_database():
             return False
-            
+
         try:
             with sqlite3.connect(self.db_path) as conn:
                 # Step 1: Create new enhanced tables
                 self._create_enhanced_tables(conn)
-                
+
                 # Step 2: Migrate existing data
                 self._migrate_existing_data(conn)
-                
+
                 # Step 3: Verify migration
                 if self._verify_migration(conn):
                     logger.info("Database migration completed successfully")
@@ -314,18 +318,19 @@ class DatabaseMigration:
                 else:
                     logger.error("Migration verification failed")
                     return False
-                    
+
         except Exception as e:
             logger.error(f"Migration failed: {e}")
             # Restore backup
             self._restore_backup()
             return False
-    
+
     def _create_enhanced_tables(self, conn: sqlite3.Connection):
         """Create new enhanced table structures."""
-        
+
         # Enhanced Downloads Table
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS downloads_enhanced (
                 id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
@@ -347,10 +352,12 @@ class DatabaseMigration:
                 source_url TEXT,
                 checksum TEXT
             )
-        """)
-        
+        """
+        )
+
         # Collections Table
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS collections (
                 collection_id TEXT PRIMARY KEY,
                 collection_type TEXT NOT NULL,
@@ -362,10 +369,12 @@ class DatabaseMigration:
                 last_checked TEXT,
                 is_recommended BOOLEAN DEFAULT 0
             )
-        """)
-        
+        """
+        )
+
         # Track-Collection Relationships
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS track_collections (
                 track_id TEXT NOT NULL,
                 collection_id TEXT NOT NULL,
@@ -373,10 +382,12 @@ class DatabaseMigration:
                 added_date TEXT,
                 PRIMARY KEY (track_id, collection_id)
             )
-        """)
-        
+        """
+        )
+
         # Enhanced Failed Downloads
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS failed_downloads_enhanced (
                 id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
@@ -388,70 +399,84 @@ class DatabaseMigration:
                 last_attempt TEXT,
                 original_url TEXT
             )
-        """)
-    
+        """
+        )
+
     def _migrate_existing_data(self, conn: sqlite3.Connection):
         """Migrate existing data from old tables to new structure."""
-        
+
         # Migrate downloads
         cursor = conn.execute("SELECT id FROM downloads")
         old_downloads = cursor.fetchall()
-        
+
         for (track_id,) in old_downloads:
             # Insert with minimal required data, rest will be filled later
-            conn.execute("""
-                INSERT OR IGNORE INTO downloads_enhanced 
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO downloads_enhanced
                 (id, source, title, artist, file_path, download_date)
                 VALUES (?, 'unknown', 'Unknown Track', 'Unknown Artist', 'unknown', ?)
-            """, (track_id, datetime.now().isoformat()))
-        
+            """,
+                (track_id, datetime.now().isoformat()),
+            )
+
         # Migrate failed downloads (if table exists)
         try:
             cursor = conn.execute("SELECT source, media_type, id FROM failed_downloads")
             old_failed = cursor.fetchall()
-            
+
             for source, media_type, track_id in old_failed:
-                conn.execute("""
-                    INSERT OR IGNORE INTO failed_downloads_enhanced 
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO failed_downloads_enhanced
                     (id, source, media_type, last_attempt)
                     VALUES (?, ?, ?, ?)
-                """, (track_id, source, media_type, datetime.now().isoformat()))
+                """,
+                    (track_id, source, media_type, datetime.now().isoformat()),
+                )
         except sqlite3.OperationalError:
             # failed_downloads table doesn't exist, which is fine
             logger.debug("No failed_downloads table to migrate")
-    
+
     def _verify_migration(self, conn: sqlite3.Connection) -> bool:
         """Verify that migration was successful."""
         try:
             # Check that all old data was migrated
             old_count = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
-            new_count = conn.execute("SELECT COUNT(*) FROM downloads_enhanced").fetchone()[0]
-            
+            new_count = conn.execute(
+                "SELECT COUNT(*) FROM downloads_enhanced"
+            ).fetchone()[0]
+
             if old_count != new_count:
                 logger.error(f"Download count mismatch: {old_count} -> {new_count}")
                 return False
-            
+
             # Check that new tables exist
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
-            
-            required_tables = ['downloads_enhanced', 'collections', 'track_collections', 'failed_downloads_enhanced']
+
+            required_tables = [
+                "downloads_enhanced",
+                "collections",
+                "track_collections",
+                "failed_downloads_enhanced",
+            ]
             for table in required_tables:
                 if table not in tables:
                     logger.error(f"Missing table: {table}")
                     return False
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Verification error: {e}")
             return False
-    
+
     def _restore_backup(self):
         """Restore database from backup."""
         try:
             shutil.copy2(self.backup_path, self.db_path)
-            logger.info(f"Database restored from backup")
+            logger.info("Database restored from backup")
         except Exception as e:
             logger.error(f"Failed to restore backup: {e}")
 
@@ -475,35 +500,52 @@ class Database:
         """Set item as downloaded, writing to both old and new tables."""
         # Always write to old table for backward compatibility
         self.downloads.add((item_id,))
-        
+
         # Write to enhanced table if available
         if self.enhanced_downloads and metadata:
             # Extract metadata with defaults
-            source = metadata.get('source', 'unknown')
-            title = metadata.get('title', 'Unknown Track')
-            artist = metadata.get('artist', 'Unknown Artist')
-            album = metadata.get('album')
-            album_artist = metadata.get('album_artist')
-            track_number = metadata.get('track_number')
-            disc_number = metadata.get('disc_number')
-            year = metadata.get('year')
-            genre = metadata.get('genre')
-            duration = metadata.get('duration')
-            quality = metadata.get('quality')
-            file_path = metadata.get('file_path', 'unknown')
-            file_size = metadata.get('file_size')
-            download_date = metadata.get('download_date', datetime.now().isoformat())
-            source_playlist_id = metadata.get('source_playlist_id')
-            source_album_id = metadata.get('source_album_id')
-            source_url = metadata.get('source_url')
-            checksum = metadata.get('checksum')
-            
-            self.enhanced_downloads.add((
-                item_id, source, title, artist, album, album_artist,
-                track_number, disc_number, year, genre, duration, quality,
-                file_path, file_size, download_date, source_playlist_id,
-                source_album_id, source_url, checksum
-            ))
+            source = metadata.get("source", "unknown")
+            title = metadata.get("title", "Unknown Track")
+            artist = metadata.get("artist", "Unknown Artist")
+            album = metadata.get("album")
+            album_artist = metadata.get("album_artist")
+            track_number = metadata.get("track_number")
+            disc_number = metadata.get("disc_number")
+            year = metadata.get("year")
+            genre = metadata.get("genre")
+            duration = metadata.get("duration")
+            quality = metadata.get("quality")
+            file_path = metadata.get("file_path", "unknown")
+            file_size = metadata.get("file_size")
+            download_date = metadata.get("download_date", datetime.now().isoformat())
+            source_playlist_id = metadata.get("source_playlist_id")
+            source_album_id = metadata.get("source_album_id")
+            source_url = metadata.get("source_url")
+            checksum = metadata.get("checksum")
+
+            self.enhanced_downloads.add(
+                (
+                    item_id,
+                    source,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    track_number,
+                    disc_number,
+                    year,
+                    genre,
+                    duration,
+                    quality,
+                    file_path,
+                    file_size,
+                    download_date,
+                    source_playlist_id,
+                    source_album_id,
+                    source_url,
+                    checksum,
+                )
+            )
 
     def get_failed_downloads(self) -> list[tuple[str, str, str]]:
         """Get failed downloads, using enhanced table if available."""
@@ -515,38 +557,63 @@ class Database:
         """Set item as failed, writing to both old and new tables."""
         # Always write to old table for backward compatibility
         self.failed.add((source, media_type, id))
-        
+
         # Write to enhanced table if available
         if self.enhanced_failed and metadata:
-            title = metadata.get('title')
-            artist = metadata.get('artist')
-            error_message = metadata.get('error_message')
-            retry_count = metadata.get('retry_count', 0)
-            last_attempt = metadata.get('last_attempt', datetime.now().isoformat())
-            original_url = metadata.get('original_url')
-            
-            self.enhanced_failed.add((
-                id, source, media_type, title, artist, error_message,
-                retry_count, last_attempt, original_url
-            ))
+            title = metadata.get("title")
+            artist = metadata.get("artist")
+            error_message = metadata.get("error_message")
+            retry_count = metadata.get("retry_count", 0)
+            last_attempt = metadata.get("last_attempt", datetime.now().isoformat())
+            original_url = metadata.get("original_url")
 
-    def add_collection(self, collection_id: str, collection_type: str, source: str, 
-                      name: str, **metadata):
+            self.enhanced_failed.add(
+                (
+                    id,
+                    source,
+                    media_type,
+                    title,
+                    artist,
+                    error_message,
+                    retry_count,
+                    last_attempt,
+                    original_url,
+                )
+            )
+
+    def add_collection(
+        self,
+        collection_id: str,
+        collection_type: str,
+        source: str,
+        name: str,
+        **metadata,
+    ):
         """Add a collection (playlist/album) to the database."""
         if self.collections:
-            description = metadata.get('description')
-            track_count = metadata.get('track_count')
-            last_synced = metadata.get('last_synced', datetime.now().isoformat())
-            last_checked = metadata.get('last_checked', datetime.now().isoformat())
-            is_recommended = metadata.get('is_recommended', False)
-            
-            self.collections.add((
-                collection_id, collection_type, source, name, description,
-                track_count, last_synced, last_checked, is_recommended
-            ))
+            description = metadata.get("description")
+            track_count = metadata.get("track_count")
+            last_synced = metadata.get("last_synced", datetime.now().isoformat())
+            last_checked = metadata.get("last_checked", datetime.now().isoformat())
+            is_recommended = metadata.get("is_recommended", False)
 
-    def link_track_to_collection(self, track_id: str, collection_id: str, 
-                                position: Optional[int] = None):
+            self.collections.add(
+                (
+                    collection_id,
+                    collection_type,
+                    source,
+                    name,
+                    description,
+                    track_count,
+                    last_synced,
+                    last_checked,
+                    is_recommended,
+                )
+            )
+
+    def link_track_to_collection(
+        self, track_id: str, collection_id: str, position: Optional[int] = None
+    ):
         """Link a track to a collection."""
         if self.track_collections:
             added_date = datetime.now().isoformat()
@@ -558,7 +625,7 @@ class Database:
             with sqlite3.connect(self.track_collections.path) as conn:
                 cursor = conn.execute(
                     "SELECT track_id FROM track_collections WHERE collection_id = ? ORDER BY position",
-                    (collection_id,)
+                    (collection_id,),
                 )
                 return [row[0] for row in cursor.fetchall()]
         return []
@@ -569,7 +636,7 @@ class Database:
             with sqlite3.connect(self.track_collections.path) as conn:
                 cursor = conn.execute(
                     "SELECT collection_id FROM track_collections WHERE track_id = ?",
-                    (track_id,)
+                    (track_id,),
                 )
                 return [row[0] for row in cursor.fetchall()]
         return []
