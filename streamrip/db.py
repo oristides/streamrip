@@ -70,16 +70,41 @@ class DatabaseBase(DatabaseInterface):
 
         self.path = path
 
-        if not os.path.exists(self.path):
-            self.create()
+        # Always ensure the table exists
+        self.create()
 
     def create(self):
         """Create a database."""
         with sqlite3.connect(self.path) as conn:
-            params = ", ".join(
-                f"{key} {' '.join(map(str.upper, props))} NOT NULL"
-                for key, props in self.structure.items()
+            # Check if table already exists
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (self.name,),
             )
+            if cursor.fetchone():
+                logger.debug(f"Table {self.name} already exists")
+                return
+
+            # Build column definitions
+            columns = []
+            primary_keys = []
+
+            for key, props in self.structure.items():
+                if key == "PRIMARY KEY":
+                    # Handle composite primary key
+                    primary_keys.extend(props)
+                else:
+                    # Handle regular column
+                    column_def = f"{key} {' '.join(map(str.upper, props))}"
+                    if "NOT NULL" not in column_def and "nullable" not in props:
+                        column_def += " NOT NULL"
+                    columns.append(column_def)
+
+            # Build the CREATE TABLE command
+            params = ", ".join(columns)
+            if primary_keys:
+                params += f", PRIMARY KEY ({', '.join(primary_keys)})"
+
             command = f"CREATE TABLE {self.name} ({params})"
 
             logger.debug("executing %s", command)
