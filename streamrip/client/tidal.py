@@ -710,6 +710,73 @@ class TidalClient(Client):
                         if track_id:
                             missing_urls.append(f"https://tidal.com/track/{track_id}")
 
+    async def get_missing_tracks_with_context(
+        self, playlists=False, albums=False, recommended=False, db=None
+    ):
+        """Get missing tracks with playlist context for proper folder organization.
+
+        Args:
+            playlists: Include playlists
+            albums: Include albums
+            recommended: Include recommended content
+            db: Database instance to check downloaded tracks
+
+        Returns:
+            dict: Dictionary with playlist names as keys and lists of track data as values
+        """
+        from rich.console import Console
+
+        console = Console()
+        missing_tracks_by_playlist = {}
+        missing_urls = []  # For backward compatibility with albums
+
+        if playlists:
+            console.print("[blue]📋 Getting missing tracks from playlists...")
+            playlists_data = await self.get_user_playlists()
+            for playlist in playlists_data:
+                playlist_name = playlist.get("name", "Unknown Playlist")
+                tracks = await self._get_playlist_tracks(playlist["id"])
+                missing = self._find_missing_tracks(tracks, db)
+
+                if missing:
+                    missing_tracks_by_playlist[playlist_name] = []
+                    for track in missing:
+                        track_id = track.get("id")
+                        if track_id:
+                            missing_tracks_by_playlist[playlist_name].append(
+                                {
+                                    "id": track_id,
+                                    "url": f"https://tidal.com/track/{track_id}",
+                                    "playlist_id": playlist["id"],
+                                    "playlist_name": playlist_name,
+                                }
+                            )
+
+            if recommended:
+                console.print(
+                    "[blue]🎯 Getting missing tracks from recommended playlists..."
+                )
+                rec_playlists = await self.get_recommended_playlists()
+                for playlist in rec_playlists:
+                    playlist_name = playlist.get("name", "Unknown Playlist")
+                    tracks = await self._get_playlist_tracks(playlist["id"])
+                    missing = self._find_missing_tracks(tracks, db)
+
+                    if missing:
+                        if playlist_name not in missing_tracks_by_playlist:
+                            missing_tracks_by_playlist[playlist_name] = []
+                        for track in missing:
+                            track_id = track.get("id")
+                            if track_id:
+                                missing_tracks_by_playlist[playlist_name].append(
+                                    {
+                                        "id": track_id,
+                                        "url": f"https://tidal.com/track/{track_id}",
+                                        "playlist_id": playlist["id"],
+                                        "playlist_name": playlist_name,
+                                    }
+                                )
+
         if albums:
             console.print("[blue]💿 Getting missing tracks from albums...")
             albums_data = await self.get_user_albums()
@@ -742,14 +809,59 @@ class TidalClient(Client):
                 seen.add(url)
                 unique_urls.append(url)
 
-        console.print(f"[green]Found {len(unique_urls)} unique missing tracks")
-        return unique_urls
+        # Return the appropriate data structure based on what was requested
+        if playlists:
+            total_playlist_tracks = sum(
+                len(tracks) for tracks in missing_tracks_by_playlist.values()
+            )
+            console.print(
+                f"[green]Found {total_playlist_tracks} missing tracks across {len(missing_tracks_by_playlist)} playlists"
+            )
+            return missing_tracks_by_playlist
+        else:
+            console.print(f"[green]Found {len(unique_urls)} unique missing tracks")
+            return unique_urls
 
     async def _get_playlist_tracks(self, playlist_id):
-        """Get tracks from a specific playlist."""
+        """Get tracks from a specific playlist with pagination support."""
         try:
+            # Get initial page
             tracks_data = await self._api_request(f"playlists/{playlist_id}/tracks")
-            return tracks_data.get("items", [])
+            all_tracks = tracks_data.get("items", [])
+
+            # Check if there are more tracks to fetch (pagination)
+            total_tracks = tracks_data.get("totalNumberOfItems", len(all_tracks))
+            tracks_left = total_tracks - len(all_tracks)
+
+            # Fetch remaining pages if needed
+            offset = 100  # Start from second page
+            while tracks_left > 0:
+                try:
+                    page_data = await self._api_request(
+                        f"playlists/{playlist_id}/tracks",
+                        {"offset": offset, "limit": 100},
+                    )
+                    page_tracks = page_data.get("items", [])
+                    all_tracks.extend(page_tracks)
+
+                    tracks_left -= len(page_tracks)
+                    offset += 100
+
+                    # Safety check to prevent infinite loops
+                    if len(page_tracks) == 0:
+                        break
+
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to fetch page at offset {offset} for playlist {playlist_id}: {e}"
+                    )
+                    break
+
+            logger.debug(
+                f"Fetched {len(all_tracks)} tracks from playlist {playlist_id} (total: {total_tracks})"
+            )
+            return all_tracks
+
         except Exception as e:
             logger.warning(f"Failed to get tracks for playlist {playlist_id}: {e}")
             return []
@@ -765,15 +877,39 @@ class TidalClient(Client):
 
     def _find_missing_tracks(self, collection_tracks, db):
         """Find tracks that are in collection but not downloaded."""
+        from rich.console import Console
+
+        console = Console()
         missing = []
+        total_tracks = len(collection_tracks)
+        already_downloaded = 0
 
         for track in collection_tracks:
             track_id = track.get("id")
-            if track_id and db and not db.downloaded(track_id):
-                missing.append(track)
+            if track_id and db:
+                is_downloaded = db.downloaded(track_id)
+                if not is_downloaded:
+                    missing.append(track)
+                else:
+                    already_downloaded += 1
             elif track_id and not db:
                 # If no database provided, assume all tracks are missing
                 missing.append(track)
+
+        if total_tracks > 0:
+            console.print(
+                f"[blue]🔍 Filtered {total_tracks} tracks: {len(missing)} missing, {already_downloaded} already downloaded"
+            )
+
+            # Debug: Show first few missing track IDs
+            if len(missing) > 0 and len(missing) <= 5:
+                missing_ids = [track.get("id") for track in missing if track.get("id")]
+                console.print(f"[yellow]🔍 Missing track IDs: {missing_ids}")
+            elif len(missing) > 5:
+                missing_ids = [
+                    track.get("id") for track in missing[:3] if track.get("id")
+                ]
+                console.print(f"[yellow]🔍 First 3 missing track IDs: {missing_ids}")
 
         return missing
 

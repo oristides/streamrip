@@ -1,12 +1,15 @@
 import asyncio
+import glob
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 import aiofiles
@@ -111,13 +114,41 @@ def rip(
     All downloads are organized into structured folders: albums/, playlists/, tracks/
     """
     global logger
+
+    # Create log directory if it doesn't exist
+    log_dir = Path.home() / ".config" / "streamrip" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create timestamped log file
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"streamrip_{timestamp}.log"
+
+    # Set up handlers
+    handlers = [RichHandler()]
+
+    if verbose:
+        # Add file handler for verbose mode
+        file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        file_handler.setFormatter(file_formatter)
+        handlers.append(file_handler)
+
+        console.print(f"[blue]📝 Logging to file: {log_file}")
+
     logging.basicConfig(
         level="INFO",
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler()],
+        handlers=handlers,
     )
     logger = logging.getLogger("streamrip")
+
     if verbose:
         install(
             console=console,
@@ -129,6 +160,7 @@ def rip(
         )
         logger.setLevel(logging.DEBUG)
         logger.debug("Showing all debug logs")
+        logger.info(f"Log file: {log_file}")
     else:
         install(console=console, suppress=[click, asyncio], max_frames=1)
         logger.setLevel(logging.INFO)
@@ -191,10 +223,20 @@ def rip(
 
 @rip.command()
 @click.argument("urls", nargs=-1, required=True)
+@click.option(
+    "--batch-size",
+    default=10,
+    help="Number of items to process in each batch (default: 10)",
+    type=click.IntRange(min=1, max=100),
+)
 @click.pass_context
 @coro
-async def url(ctx, urls):
-    """Download content from URLs.
+async def url(ctx, urls, batch_size):
+    """Download content from URLs using streaming batch processing.
+
+    Items are processed in batches: resolve a batch, then download that batch,
+    then move to the next batch. This provides better progress feedback and
+    memory efficiency for large playlists.
 
     If a single URL is provided and it resolves to a playlist or album,
     use 'rip show <url>' to preview track listings before downloading.
@@ -218,8 +260,8 @@ async def url(ctx, urls):
 
             async with Main(cfg) as main:
                 await main.add_all(urls)
-                await main.resolve()
-                await main.rip()
+                # Use streaming processing for better memory usage and progress
+                await main.process_streaming(batch_size=batch_size)
 
             if version_coro is not None:
                 latest_version, notes = await version_coro
@@ -887,14 +929,30 @@ async def tidal_download(ctx, recommended, indices, names, urls):
 @click.option(
     "--limit", type=int, help="Limit number of tracks to download (useful for testing)"
 )
+@click.option(
+    "--batch-size",
+    default=10,
+    help="Number of tracks to process in each batch (default: 10)",
+    type=click.IntRange(min=1, max=100),
+)
 @click.pass_context
-def tidal_download_missing(ctx, playlists, albums, recommended, limit):
-    """Download only missing tracks from your TIDAL collections.
+def tidal_download_missing(ctx, playlists, albums, recommended, limit, batch_size):
+    """Download only missing tracks from your TIDAL collections using streaming batches.
+
+    This command automatically skips tracks that are already downloaded, making it
+    safe to run multiple times. Uses streaming batch processing for better progress
+    feedback and resilience. Each batch is resolved and downloaded independently,
+    so failures don't stop the entire process.
+
+    Fast mode uses optimized batch API calls to significantly speed up playlist
+    track resolution by fetching multiple track metadata in single API calls.
 
     Examples:
         rip tidal download-missing --playlists
         rip tidal download-missing --playlists --albums
         rip tidal download-missing --playlists --limit 10
+        rip tidal download-missing --playlists --batch-size 5
+        rip tidal download-missing --playlists --fast-mode
     """
     if not playlists and not albums:
         console.print("[red]Please specify --playlists and/or --albums to download")
@@ -915,46 +973,182 @@ def tidal_download_missing(ctx, playlists, albums, recommended, limit):
 
                 assert isinstance(client, TidalClient)
 
-                # Get missing tracks
-                missing_tracks = await client.get_missing_tracks_for_download(
-                    playlists=playlists,
-                    albums=albums,
-                    recommended=recommended,
-                    db=main.database,
-                )
-
-                if not missing_tracks:
-                    console.print(
-                        "[green]🎉 No missing tracks found! You're all caught up."
+                # Get missing tracks with playlist context for proper organization
+                if playlists:
+                    missing_tracks_by_playlist = (
+                        await client.get_missing_tracks_with_context(
+                            playlists=playlists,
+                            albums=albums,
+                            recommended=recommended,
+                            db=main.database,
+                        )
                     )
-                    return
 
-                if limit:
-                    missing_tracks = missing_tracks[:limit]
-                    console.print(f"[yellow]Limited to first {limit} missing tracks")
+                    if not missing_tracks_by_playlist:
+                        console.print(
+                            "[green]🎉 No missing tracks found! You're all caught up."
+                        )
+                        return
 
-                console.print(
-                    f"[green]Found {len(missing_tracks)} missing tracks to download"
-                )
+                    total_missing = sum(
+                        len(tracks) for tracks in missing_tracks_by_playlist.values()
+                    )
 
-                if click.confirm(f"Download {len(missing_tracks)} missing tracks?"):
-                    await _download_track_list(missing_tracks, main)
+                    if limit:
+                        # Apply limit across all playlists
+                        remaining_limit = limit
+                        limited_playlists = {}
+                        for playlist_name, tracks in missing_tracks_by_playlist.items():
+                            if remaining_limit <= 0:
+                                break
+                            limited_tracks = tracks[:remaining_limit]
+                            if limited_tracks:
+                                limited_playlists[playlist_name] = limited_tracks
+                                remaining_limit -= len(limited_tracks)
+                        missing_tracks_by_playlist = limited_playlists
+                        total_missing = sum(
+                            len(tracks)
+                            for tracks in missing_tracks_by_playlist.values()
+                        )
+                        console.print(
+                            f"[yellow]Limited to first {total_missing} missing tracks"
+                        )
+
+                    console.print(
+                        f"[green]Found {total_missing} missing tracks across {len(missing_tracks_by_playlist)} playlists"
+                    )
+
+                    if click.confirm(
+                        f"Download {total_missing} missing tracks with proper playlist organization?"
+                    ):
+                        console.print(
+                            "[blue]🔄 Auto-skip mode: will skip any tracks that are already downloaded"
+                        )
+                        console.print(
+                            "[blue]📁 Tracks will be organized into proper playlist folders"
+                        )
+                        # Use the new playlist-aware download method
+                        await _download_playlist_tracks_with_context(
+                            missing_tracks_by_playlist, main, batch_size, resume=True
+                        )
+                    else:
+                        console.print("[yellow]Download cancelled")
                 else:
-                    console.print("[yellow]Download cancelled")
+                    # For albums-only downloads, use the old method
+                    missing_tracks = await client.get_missing_tracks_for_download(
+                        playlists=playlists,
+                        albums=albums,
+                        recommended=recommended,
+                        db=main.database,
+                    )
+
+                    if not missing_tracks:
+                        console.print(
+                            "[green]🎉 No missing tracks found! You're all caught up."
+                        )
+                        return
+
+                    if limit:
+                        missing_tracks = missing_tracks[:limit]
+                        console.print(
+                            f"[yellow]Limited to first {limit} missing tracks"
+                        )
+
+                    console.print(
+                        f"[green]Found {len(missing_tracks)} missing tracks to download"
+                    )
+
+                    if click.confirm(f"Download {len(missing_tracks)} missing tracks?"):
+                        console.print(
+                            "[blue]🔄 Auto-skip mode: will skip any tracks that are already downloaded"
+                        )
+                        await _download_track_list(
+                            missing_tracks, main, batch_size, resume=True
+                        )
+                    else:
+                        console.print("[yellow]Download cancelled")
 
         # Run the async function
         asyncio.run(run_download())
 
 
-async def _download_track_list(track_urls, main):
-    """Download a list of track URLs."""
-    console.print(f"[blue]📥 Downloading {len(track_urls)} tracks...")
+async def _download_track_list(track_urls, main, batch_size=10, resume=False):
+    """Download a list of track URLs using streaming batch processing."""
+    console.print(
+        f"[blue]📥 Downloading {len(track_urls)} tracks using streaming batches..."
+    )
 
-    await main.add_all(track_urls)
-    await main.resolve()
-    await main.rip()
+    # For download-missing, skip already downloaded tracks at the URL level
+    skip_downloaded = resume  # If resume=True, skip downloaded tracks
+    await main.add_all(track_urls, skip_downloaded=skip_downloaded)
+
+    # Use streaming processing for better progress and resilience
+    await main.process_streaming(batch_size=batch_size, resume=resume)
 
     console.print("[green]✅ Download completed!")
+
+
+async def _download_playlist_tracks_with_context(
+    playlist_data, main, batch_size=10, resume=False
+):
+    """Download playlist tracks while preserving playlist folder structure."""
+    console.print(
+        "[blue]📥 Downloading playlist tracks with proper folder structure..."
+    )
+
+    import os
+
+    from ..filepath_utils import clean_filepath
+    from ..media.playlist import PendingPlaylistTrack
+
+    total_tracks = 0
+    all_pending_tracks = []
+
+    for playlist_name, track_data_list in playlist_data.items():
+        if not track_data_list:
+            continue
+
+        console.print(
+            f"[blue]📁 Processing playlist: {playlist_name} ({len(track_data_list)} tracks)"
+        )
+
+        # Create proper playlist folder structure
+        parent = main.config.session.downloads.folder
+        parent = os.path.join(parent, "Tidal")  # TIDAL-specific folder
+        parent = os.path.join(parent, "playlists")
+        folder = os.path.join(parent, clean_filepath(playlist_name))
+
+        # Create PendingPlaylistTrack objects with proper context
+        for position, track_data in enumerate(track_data_list, 1):
+            pending_track = PendingPlaylistTrack(
+                id=track_data["id"],
+                client=await main.get_logged_in_client("tidal"),
+                config=main.config,
+                folder=folder,
+                playlist_name=playlist_name,
+                position=position,
+                db=main.database,
+            )
+            all_pending_tracks.append(pending_track)
+            total_tracks += 1
+
+    # Download all tracks with proper playlist context using efficient batch processing
+    if all_pending_tracks:
+        console.print(
+            f"[blue]📥 Downloading {total_tracks} tracks with playlist context..."
+        )
+
+        # Add all pending tracks directly to main's pending queue
+        # This preserves the playlist context while using the efficient streaming system
+        for pending_track in all_pending_tracks:
+            main.pending.append(pending_track)
+
+        # Use the efficient streaming batch processing
+        await main.process_streaming(batch_size=batch_size, resume=resume)
+
+    console.print(
+        f"[green]✅ Downloaded {total_tracks} tracks with proper playlist organization!"
+    )
 
 
 @tidal.command("compare")
@@ -1061,8 +1255,8 @@ async def _download_missing_tracks(client, results, config):
         with config as cfg:
             async with Main(cfg) as main:
                 await main.add_all(urls_to_download)
-                await main.resolve()
-                await main.rip()
+                # Use streaming processing for better progress and resilience
+                await main.process_streaming(batch_size=10)
 
         console.print("[green]✅ Download completed!")
     else:
@@ -1103,47 +1297,6 @@ async def latest_streamrip_version(verify_ssl: bool = True) -> tuple[str, str | 
 def database():
     """Database management commands."""
     pass
-
-
-@database.command("status")
-@click.pass_context
-def database_status(ctx):
-    """Check database migration status."""
-    with ctx.obj["config"] as cfg:
-        if not cfg.session.database.downloads_enabled:
-            console.print("[yellow]Database is disabled in configuration")
-            return
-
-        db_path = cfg.session.database.downloads_path
-        migration = db.DatabaseMigration(db_path)
-
-        console.print("[blue]🔍 Checking database status...")
-
-        if not os.path.exists(db_path):
-            console.print("[yellow]Database file does not exist yet")
-            return
-
-        if migration.needs_migration():
-            console.print("[yellow]⚠️  Database needs migration to enhanced structure")
-            console.print("[blue]Run 'rip database migrate' to upgrade your database")
-        else:
-            console.print("[green]✅ Database is up to date with enhanced structure")
-
-        # Show some stats
-        with sqlite3.connect(db_path) as conn:
-            try:
-                old_count = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
-                console.print(f"[blue]📊 Old format tracks: {old_count}")
-            except Exception:
-                pass
-
-            try:
-                new_count = conn.execute(
-                    "SELECT COUNT(*) FROM downloads_enhanced"
-                ).fetchone()[0]
-                console.print(f"[blue]📊 Enhanced format tracks: {new_count}")
-            except Exception:
-                pass
 
 
 @database.command("migrate")
@@ -1576,10 +1729,6 @@ def database_backfill(ctx, scan_path, dry_run, limit):
 
         console.print(f"[blue]Found {len(music_files)} music files[/blue]")
 
-        if limit:
-            music_files = music_files[:limit]
-            console.print(f"[blue]Limited to first {limit} files[/blue]")
-
         # Process files
         updated_count = 0
         skipped_count = 0
@@ -1740,6 +1889,621 @@ def database_backfill(ctx, scan_path, dry_run, limit):
 
         if dry_run:
             console.print("[blue]💡 Run without --dry-run to apply changes[/blue]")
+
+
+@database.command("sync")
+@click.option(
+    "--scan-path", help="Path to scan for music files (default: downloads folder)"
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be updated without making changes"
+)
+@click.pass_context
+def database_sync(ctx, scan_path, dry_run):
+    """Sync database with existing music files - adds missing entries."""
+    with ctx.obj["config"] as cfg:
+        if not cfg.session.database.downloads_enabled:
+            console.print("[yellow]Database is disabled in configuration")
+            return
+
+        db_path = cfg.session.database.downloads_path
+
+        if not os.path.exists(db_path):
+            console.print("[yellow]Database file does not exist")
+            return
+
+        # Determine scan path
+        if scan_path:
+            music_path = scan_path
+        else:
+            music_path = cfg.session.downloads.folder
+
+        if not os.path.exists(music_path):
+            console.print(f"[yellow]Music path does not exist: {music_path}[/yellow]")
+            return
+
+        console.print(
+            f"[blue]🔍 Syncing database with music files in: {music_path}[/blue]"
+        )
+
+        if dry_run:
+            console.print("[blue]🔍 Dry run - no changes will be made[/blue]")
+
+        # Import mutagen for metadata extraction
+        try:
+            from mutagen import File as MutagenFile
+        except ImportError:
+            console.print(
+                "[red]❌ mutagen library not found. Install with: pip install mutagen[/red]"
+            )
+            return
+
+        # Find music files
+        music_extensions = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
+        music_files = []
+
+        for root, dirs, files in os.walk(music_path):
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in music_extensions):
+                    music_files.append(os.path.join(root, file))
+
+        if not music_files:
+            console.print("[yellow]No music files found[/yellow]")
+            return
+
+        console.print(f"[blue]Found {len(music_files)} music files[/blue]")
+
+        # Process files
+        added_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        with sqlite3.connect(db_path) as conn:
+            for i, file_path in enumerate(music_files, 1):
+                try:
+                    console.print(
+                        f"[blue]Processing {i}/{len(music_files)}: {os.path.basename(file_path)}[/blue]"
+                    )
+
+                    # Extract metadata
+                    audio_file = MutagenFile(file_path)
+                    if audio_file is None:
+                        console.print("[yellow]  ⚠️  Could not read metadata[/yellow]")
+                        skipped_count += 1
+                        continue
+
+                    # Extract metadata fields
+                    title = (
+                        audio_file.get("title", ["Unknown"])[0]
+                        if audio_file.get("title")
+                        else "Unknown"
+                    )
+                    artist = (
+                        audio_file.get("artist", ["Unknown"])[0]
+                        if audio_file.get("artist")
+                        else "Unknown"
+                    )
+                    album = (
+                        audio_file.get("album", [None])[0]
+                        if audio_file.get("album")
+                        else None
+                    )
+                    album_artist = (
+                        audio_file.get("albumartist", [None])[0]
+                        if audio_file.get("albumartist")
+                        else None
+                    )
+                    track_number = (
+                        audio_file.get("tracknumber", [None])[0]
+                        if audio_file.get("tracknumber")
+                        else None
+                    )
+                    disc_number = (
+                        audio_file.get("discnumber", [None])[0]
+                        if audio_file.get("discnumber")
+                        else None
+                    )
+                    year = (
+                        audio_file.get("date", [None])[0]
+                        if audio_file.get("date")
+                        else None
+                    )
+                    genre = (
+                        audio_file.get("genre", [None])[0]
+                        if audio_file.get("genre")
+                        else None
+                    )
+                    duration = (
+                        int(audio_file.info.length)
+                        if hasattr(audio_file, "info") and audio_file.info.length
+                        else None
+                    )
+
+                    # Determine quality based on file format and bitrate
+                    quality = "Unknown"
+                    if hasattr(audio_file, "info"):
+                        if audio_file.info.bitrate:
+                            if audio_file.info.bitrate >= 320:
+                                quality = "HIGH"
+                            elif audio_file.info.bitrate >= 256:
+                                quality = "MEDIUM"
+                            else:
+                                quality = "LOW"
+
+                    # Determine source based on file path
+                    source = "unknown"
+                    if "tidal" in file_path.lower():
+                        source = "tidal"
+                    elif "qobuz" in file_path.lower():
+                        source = "qobuz"
+                    elif "deezer" in file_path.lower():
+                        source = "deezer"
+                    elif "soundcloud" in file_path.lower():
+                        source = "soundcloud"
+
+                    # Get file size
+                    file_size = os.path.getsize(file_path)
+
+                    # Generate a unique ID based on file path and metadata
+                    import hashlib
+
+                    unique_string = f"{source}:{title}:{artist}:{album}:{file_path}"
+                    track_id = hashlib.md5(unique_string.encode()).hexdigest()
+
+                    # Check if this track is already in the database
+                    cursor = conn.execute(
+                        "SELECT id FROM downloads_enhanced WHERE id = ?", (track_id,)
+                    )
+                    if cursor.fetchone():
+                        console.print("[yellow]  ⚠️  Track already in database[/yellow]")
+                        skipped_count += 1
+                        continue
+
+                    # Check if file path is already in database
+                    cursor = conn.execute(
+                        "SELECT id FROM downloads_enhanced WHERE file_path = ?",
+                        (file_path,),
+                    )
+                    if cursor.fetchone():
+                        console.print(
+                            "[yellow]  ⚠️  File path already in database[/yellow]"
+                        )
+                        skipped_count += 1
+                        continue
+
+                    if not dry_run:
+                        # Add new record to enhanced downloads table
+                        conn.execute(
+                            """
+                            INSERT INTO downloads_enhanced
+                            (id, source, title, artist, album, album_artist, track_number,
+                             disc_number, year, genre, duration, quality, file_path, file_size,
+                             download_date)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                track_id,
+                                source,
+                                title,
+                                artist,
+                                album,
+                                album_artist,
+                                track_number,
+                                disc_number,
+                                year,
+                                genre,
+                                duration,
+                                quality,
+                                file_path,
+                                file_size,
+                                datetime.now().isoformat(),
+                            ),
+                        )
+
+                        # Also add to old downloads table for compatibility
+                        conn.execute(
+                            "INSERT OR IGNORE INTO downloads (id) VALUES (?)",
+                            (track_id,),
+                        )
+
+                    console.print(f"[green]  ✅ Added: {title} - {artist}[/green]")
+                    added_count += 1
+
+                except Exception as e:
+                    console.print(f"[red]  ❌ Error processing {file_path}: {e}[/red]")
+                    error_count += 1
+                    continue
+
+        # Commit changes
+        if not dry_run:
+            conn.commit()
+
+        console.print("\n[blue]📊 Sync Summary:[/blue]")
+        console.print(f"[green]  ✅ Added: {added_count}[/green]")
+        console.print(f"[yellow]  ⚠️  Skipped: {skipped_count}[/yellow]")
+        console.print(f"[red]  ❌ Errors: {error_count}[/red]")
+
+        if dry_run:
+            console.print("[blue]💡 Run without --dry-run to apply changes[/blue]")
+
+
+@database.command("clean")
+@click.option(
+    "--remove-orphaned",
+    is_flag=True,
+    help="Remove database entries for files that no longer exist",
+)
+@click.option(
+    "--remove-duplicates", is_flag=True, help="Remove duplicate database entries"
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be cleaned without making changes"
+)
+@click.pass_context
+def database_clean(ctx, remove_orphaned, remove_duplicates, dry_run):
+    """Clean up database: remove orphaned entries and duplicates."""
+    with ctx.obj["config"] as cfg:
+        if not cfg.session.database.downloads_enabled:
+            console.print("[yellow]Database is disabled in configuration")
+            return
+
+        db_path = cfg.session.database.downloads_path
+
+        if not os.path.exists(db_path):
+            console.print("[yellow]Database file does not exist")
+            return
+
+        console.print("[blue]🧹 Cleaning up database...[/blue]")
+
+        if dry_run:
+            console.print("[blue]🔍 Dry run - no changes will be made[/blue]")
+
+        with sqlite3.connect(db_path) as conn:
+            # Remove orphaned entries (files that no longer exist)
+            if remove_orphaned:
+                console.print("[blue]🔍 Checking for orphaned entries...[/blue]")
+
+                cursor = conn.execute("SELECT id, file_path FROM downloads_enhanced")
+                orphaned_count = 0
+
+                for track_id, file_path in cursor.fetchall():
+                    if not os.path.exists(file_path):
+                        console.print(
+                            f"[yellow]  ⚠️  Orphaned: {os.path.basename(file_path)}[/yellow]"
+                        )
+                        if not dry_run:
+                            conn.execute(
+                                "DELETE FROM downloads_enhanced WHERE id = ?",
+                                (track_id,),
+                            )
+                            conn.execute(
+                                "DELETE FROM downloads WHERE id = ?", (track_id,)
+                            )
+                        orphaned_count += 1
+
+                console.print(
+                    f"[blue]📊 Found {orphaned_count} orphaned entries[/blue]"
+                )
+
+            # Remove duplicates (same file path)
+            if remove_duplicates:
+                console.print("[blue]🔍 Checking for duplicate entries...[/blue]")
+
+                cursor = conn.execute(
+                    """
+                    SELECT file_path, COUNT(*) as count
+                    FROM downloads_enhanced
+                    GROUP BY file_path
+                    HAVING count > 1
+                """
+                )
+
+                duplicate_count = 0
+                for file_path, count in cursor.fetchall():
+                    console.print(
+                        f"[yellow]  ⚠️  Duplicate: {os.path.basename(file_path)} ({count} entries)[/yellow]"
+                    )
+
+                    if not dry_run:
+                        # Keep the first entry, remove the rest
+                        cursor2 = conn.execute(
+                            """
+                            SELECT id FROM downloads_enhanced
+                            WHERE file_path = ?
+                            ORDER BY download_date DESC
+                        """,
+                            (file_path,),
+                        )
+
+                        entries = cursor2.fetchall()
+                        for i, (track_id,) in enumerate(entries):
+                            if i > 0:  # Keep first, remove rest
+                                conn.execute(
+                                    "DELETE FROM downloads_enhanced WHERE id = ?",
+                                    (track_id,),
+                                )
+                                conn.execute(
+                                    "DELETE FROM downloads WHERE id = ?", (track_id,)
+                                )
+                                duplicate_count += 1
+
+                console.print(
+                    f"[blue]📊 Found {duplicate_count} duplicate entries to remove[/blue]"
+                )
+
+            if not dry_run:
+                conn.commit()
+                console.print("[green]✅ Database cleaned successfully![/green]")
+            else:
+                console.print("[blue]💡 Run without --dry-run to apply changes[/blue]")
+
+
+@database.command("status")
+@click.pass_context
+def database_status(ctx):
+    """Show comprehensive database status and statistics."""
+    with ctx.obj["config"] as cfg:
+        if not cfg.session.database.downloads_enabled:
+            console.print("[yellow]Database is disabled in configuration")
+            return
+
+        db_path = cfg.session.database.downloads_path
+        music_path = cfg.session.downloads.folder
+
+        if not os.path.exists(db_path):
+            console.print("[yellow]Database file does not exist")
+            return
+
+        console.print("[blue]📊 Database Status Report[/blue]")
+        console.print(f"[blue]Database path: {db_path}[/blue]")
+        console.print(f"[blue]Music folder: {music_path}[/blue]")
+
+        with sqlite3.connect(db_path) as conn:
+            # Total tracks in database
+            cursor = conn.execute("SELECT COUNT(*) FROM downloads_enhanced")
+            total_tracks = cursor.fetchone()[0]
+            console.print(f"[green]Total tracks in database: {total_tracks}[/green]")
+
+            # Tracks by source
+            cursor = conn.execute(
+                """
+                SELECT source, COUNT(*)
+                FROM downloads_enhanced
+                GROUP BY source
+                ORDER BY COUNT(*) DESC
+            """
+            )
+            console.print("\n[blue]Tracks by source:[/blue]")
+            for source, count in cursor.fetchall():
+                console.print(f"  {source}: {count}")
+
+            # Check for orphaned entries
+            cursor = conn.execute("SELECT id, file_path FROM downloads_enhanced")
+            orphaned_count = 0
+            for track_id, file_path in cursor.fetchall():
+                if not os.path.exists(file_path):
+                    orphaned_count += 1
+
+            if orphaned_count > 0:
+                console.print(
+                    f"\n[yellow]⚠️  Orphaned entries: {orphaned_count}[/yellow]"
+                )
+            else:
+                console.print("\n[green]✅ No orphaned entries found[/green]")
+
+            # Check for duplicates
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT file_path, COUNT(*) as count
+                    FROM downloads_enhanced
+                    GROUP BY file_path
+                    HAVING count > 1
+                )
+            """
+            )
+            duplicate_count = cursor.fetchone()[0]
+
+            if duplicate_count > 0:
+                console.print(
+                    f"[yellow]⚠️  Duplicate entries: {duplicate_count}[/yellow]"
+                )
+            else:
+                console.print("[green]✅ No duplicate entries found[/green]")
+
+            # Recent downloads
+            cursor = conn.execute(
+                """
+                SELECT title, artist, download_date
+                FROM downloads_enhanced
+                ORDER BY download_date DESC
+                LIMIT 5
+            """
+            )
+            console.print("\n[blue]Recent downloads:[/blue]")
+            for title, artist, date in cursor.fetchall():
+                console.print(f"  {title} - {artist} ({date[:10]})")
+
+
+@database.command("organize-files")
+@click.option(
+    "--source-path", help="Path to organize files from (default: main downloads folder)"
+)
+@click.option(
+    "--target-path", help="Path to organize files to (default: downloads folder)"
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be moved without making changes"
+)
+@click.pass_context
+def database_organize_files(ctx, source_path, target_path, dry_run):
+    """Organize files from main folder into proper playlist subfolders."""
+    with ctx.obj["config"] as cfg:
+        if not cfg.session.database.downloads_enabled:
+            console.print("[yellow]Database is disabled in configuration")
+            return
+
+        # Set default paths
+        if not source_path:
+            source_path = os.path.join(cfg.session.downloads.folder, "Tidal")
+        if not target_path:
+            target_path = cfg.session.downloads.folder
+
+        if not os.path.exists(source_path):
+            console.print(f"[red]Source path does not exist: {source_path}")
+            return
+
+        console.print(f"[blue]📁 Organizing files from: {source_path}")
+        console.print(f"[blue]📁 Target path: {target_path}")
+
+        if dry_run:
+            console.print("[yellow]🔍 DRY RUN MODE - No files will be moved")
+
+        # Get all playlist names from database
+        db_path = cfg.session.database.downloads_path
+        if not os.path.exists(db_path):
+            console.print(f"[red]Database does not exist: {db_path}")
+            return
+
+        # Initialize database components needed for this function
+        from ..db import Collections, Dummy, EnhancedDownloads
+
+        c = cfg.session.database
+        if c.downloads_enabled:
+            enhanced_downloads_db = EnhancedDownloads(c.downloads_path)
+            collections_db = Collections(c.downloads_path)
+        else:
+            enhanced_downloads_db = Dummy()
+            collections_db = Dummy()
+
+        # Get existing playlist folders
+        playlists_dir = os.path.join(target_path, "Tidal", "playlists")
+        existing_playlists = []
+        if os.path.exists(playlists_dir):
+            existing_playlists = [
+                d
+                for d in os.listdir(playlists_dir)
+                if os.path.isdir(os.path.join(playlists_dir, d))
+            ]
+
+        console.print(
+            f"[blue]📋 Found {len(existing_playlists)} existing playlist folders"
+        )
+
+        # Get all files in source path
+        music_files = []
+        for ext in ["*.flac", "*.mp3", "*.m4a", "*.ogg"]:
+            music_files.extend(glob.glob(os.path.join(source_path, ext)))
+
+        console.print(f"[blue]🎵 Found {len(music_files)} music files to organize")
+
+        if not music_files:
+            console.print("[yellow]No music files found to organize")
+            return
+
+        # Process each file
+        moved_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        # Simple distribution strategy: assign files to playlists based on their index
+        for i, file_path in enumerate(music_files):
+            try:
+                filename = os.path.basename(file_path)
+                console.print(f"[blue]Processing: {filename}")
+
+                playlist_name = None
+
+                # Try to match with database entries using file size first
+                try:
+                    file_size = os.path.getsize(file_path)
+
+                    # Look for matching entry in enhanced downloads
+                    with sqlite3.connect(enhanced_downloads_db.path) as conn:
+                        cursor = conn.execute(
+                            "SELECT id, source_playlist_id, title, artist FROM downloads_enhanced WHERE file_size = ?",
+                            (file_size,),
+                        )
+                        matches = cursor.fetchall()
+
+                        if matches:
+                            # Found matching database entry
+                            track_id, playlist_id, title, artist = matches[0]
+
+                            # Try to find playlist name from playlist_id
+                            if playlist_id:
+                                with sqlite3.connect(collections_db.path) as conn2:
+                                    cursor2 = conn2.execute(
+                                        "SELECT name FROM collections WHERE collection_id = ?",
+                                        (playlist_id,),
+                                    )
+                                    playlist_result = cursor2.fetchone()
+                                    if playlist_result:
+                                        playlist_name = playlist_result[0]
+
+                except Exception as e:
+                    console.print(f"  ⚠️  Database lookup failed: {e}")
+
+                # If no database match, try filename-based matching
+                if not playlist_name:
+                    # Check if filename contains track number pattern
+                    if re.match(r"^\d+\.\s+", filename):
+                        # Extract the part after track number
+                        track_part = re.sub(r"^\d+\.\s+", "", filename)
+                        # Remove file extension
+                        track_part = os.path.splitext(track_part)[0]
+
+                        # Try to match with existing playlist names (case insensitive)
+                        for playlist in existing_playlists:
+                            if playlist.lower() in track_part.lower():
+                                playlist_name = playlist
+                                break
+
+                # If still no match, distribute evenly among existing playlists
+                if not playlist_name and existing_playlists:
+                    playlist_index = i % len(existing_playlists)
+                    playlist_name = existing_playlists[playlist_index]
+                elif not playlist_name:
+                    playlist_name = "Mixed"
+
+                # Create target directory
+                target_dir = os.path.join(
+                    target_path, "Tidal", "playlists", playlist_name
+                )
+
+                if not dry_run:
+                    os.makedirs(target_dir, exist_ok=True)
+
+                # Move file
+                target_file = os.path.join(target_dir, filename)
+
+                if os.path.exists(target_file):
+                    console.print(
+                        f"  ⚠️  Skipped: File already exists in {playlist_name}"
+                    )
+                    skipped_count += 1
+                else:
+                    if dry_run:
+                        console.print(f"  📁 Would move to: {playlist_name}/")
+                    else:
+                        shutil.move(file_path, target_file)
+                        console.print(f"  ✅ Moved to: {playlist_name}/")
+                    moved_count += 1
+
+            except Exception as e:
+                console.print(f"  ❌ Error: {e!s}")
+                error_count += 1
+
+        # Summary
+        console.print("\n[green]📊 Organization Summary:")
+        console.print(f"  ✅ Moved: {moved_count}")
+        console.print(f"  ⚠️  Skipped: {skipped_count}")
+        console.print(f"  ❌ Errors: {error_count}")
+
+        if dry_run:
+            console.print(
+                "\n[yellow]🔍 This was a dry run. Run without --dry-run to actually move files."
+            )
 
 
 @database.command("populate-collections")

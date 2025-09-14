@@ -119,6 +119,34 @@ class TestDatabaseMigration:
             conn.execute(
                 "INSERT INTO downloads_enhanced VALUES ('test_id', 'test_source', 'Test Track')"
             )
+            # Create other required tables for verification
+            conn.execute(
+                """
+                CREATE TABLE collections (
+                    collection_id TEXT PRIMARY KEY,
+                    collection_type TEXT,
+                    name TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE track_collections (
+                    track_id TEXT,
+                    collection_id TEXT,
+                    position INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE failed_downloads_enhanced (
+                    id TEXT PRIMARY KEY,
+                    source TEXT,
+                    media_type TEXT
+                )
+                """
+            )
 
         migration = DatabaseMigration(temp_db_path)
         result = migration._verify_migration(sqlite3.connect(temp_db_path))

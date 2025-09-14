@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 
 from .. import converter
 from ..client import Client, Downloadable
@@ -80,7 +81,50 @@ class Track(Media):
         if self.config.session.conversion.enabled:
             await self._convert()
 
-        self.db.set_downloaded(self.meta.info.id)
+        # Get file size for database
+        try:
+            file_size = (
+                self.download_path.stat().st_size
+                if self.download_path.exists()
+                else None
+            )
+        except Exception:
+            file_size = None
+
+        # Get playlist information from track metadata
+        playlist_id = getattr(self.meta.info, "playlist_id", None)
+        playlist_position = getattr(self.meta.info, "playlist_position", None)
+
+        # Update database with full metadata
+        # Note: source_playlist_id stores the PRIMARY playlist (the one being downloaded)
+        # Multiple playlist relationships are stored in track_collections table
+        self.db.set_downloaded(
+            self.meta.info.id,
+            source=self.downloadable.source,
+            title=self.meta.title,
+            artist=self.meta.artist,
+            album=self.meta.album.album,
+            album_artist=self.meta.album.albumartist,
+            track_number=self.meta.tracknumber,
+            disc_number=self.meta.discnumber,
+            year=self.meta.album.year,
+            genre=self.meta.album.get_genres(),
+            duration=getattr(self.meta.info, "duration", None),
+            quality=self.meta.info.quality,
+            file_path=str(self.download_path),
+            file_size=file_size,
+            download_date=datetime.now().isoformat(),
+            source_playlist_id=playlist_id,  # Primary playlist for this download
+            source_album_id=getattr(self.meta.info, "album_id", None),
+            source_url=getattr(self.meta.info, "source_url", None),
+        )
+
+        # Populate track_collections table for this specific playlist relationship
+        # This allows the same track to be linked to multiple playlists
+        if playlist_id:
+            self.db.link_track_to_collection(
+                self.meta.info.id, playlist_id, position=playlist_position
+            )
 
     async def _convert(self):
         c = self.config.session.conversion

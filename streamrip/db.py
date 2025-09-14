@@ -527,7 +527,7 @@ class Database:
         self.downloads.add((item_id,))
 
         # Write to enhanced table if available
-        if self.enhanced_downloads and metadata:
+        if self.enhanced_downloads:
             # Extract metadata with defaults
             source = metadata.get("source", "unknown")
             title = metadata.get("title", "Unknown Track")

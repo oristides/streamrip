@@ -240,4 +240,12 @@ class TrackMetadata:
             "composer": self.composer or none_text,
             "explicit": " (Explicit) " if self.info.explicit else "",
         }
-        return format_string.format(**info)
+        # Escape any curly braces in the values to prevent format string errors
+        escaped_info = {}
+        for key, value in info.items():
+            if isinstance(value, str):
+                # Escape curly braces by doubling them
+                escaped_info[key] = value.replace("{", "{{").replace("}", "}}")
+            else:
+                escaped_info[key] = value
+        return format_string.format(**escaped_info)
