@@ -628,6 +628,7 @@ def tidal():
     """TIDAL utilities: list and download playlists, albums, and preview tracks.
 
     Commands:
+      login              Authenticate with TIDAL and update tokens
       list-playlists     List your playlists (or discovery mixes with
                          --recommended) and show an indexed table with
                          name and URL.
@@ -641,6 +642,9 @@ def tidal():
       preview-track      Preview a track by ID before downloading.
 
     Examples:
+      # Authentication
+      rip tidal login
+
       # Playlists
       rip tidal list-playlists
       rip tidal list-playlists --recommended
@@ -658,6 +662,231 @@ def tidal():
       # Track preview
       rip tidal preview-track 12345678
     """
+
+
+@tidal.command("login")
+@click.pass_context
+def tidal_login(ctx):
+    """Authenticate with TIDAL and update tokens in config.
+
+    This command will:
+    1. Automatically open a browser for you to log in to TIDAL
+    2. Wait for you to copy the redirect URL from the 'Oops' page
+    3. Get fresh authentication tokens
+    4. Automatically update your streamrip config.toml
+
+    You'll need to log in with your TIDAL email and password
+    (not Google/social login).
+
+    TIP: After logging in, just copy the URL from the 'Oops' page
+    and paste it when prompted. The browser opens automatically!
+    """
+    import re
+    import time
+    import webbrowser
+
+    try:
+        import tidalapi
+    except ImportError:
+        console.print("[red]❌ tidalapi library not found![/red]")
+        console.print("Please install it with: [cyan]pip install tidalapi[/cyan]")
+        return
+
+    config_path = ctx.obj["config_path"]
+
+    console.print("\n" + "=" * 60)
+    console.print("[bold cyan]TIDAL Authentication[/bold cyan]")
+    console.print("=" * 60)
+    console.print("[green]✓[/green] Browser will open automatically")
+    console.print("[yellow]→[/yellow] Log in with your TIDAL email and password")
+    console.print("[yellow]→[/yellow] After login, you'll see an 'Oops' page")
+    console.print("[yellow]→[/yellow] Copy the URL from the 'Oops' page")
+    console.print("[yellow]→[/yellow] Paste it below when prompted")
+    console.print("=" * 60 + "\n")
+
+    # Initialize TIDAL session
+    console.print("Initializing TIDAL session...")
+    session = tidalapi.Session()
+
+    # Get device code and auth URL
+    import base64
+    import hashlib
+    import secrets
+
+    # Generate PKCE parameters
+    code_verifier = (
+        base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("utf-8").rstrip("=")
+    )
+    code_challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("utf-8")).digest())
+        .decode("utf-8")
+        .rstrip("=")
+    )
+
+    client_id = base64.b64decode(
+        base64.b64decode(b"TmtKRVUxSmtjRXM=")
+        + base64.b64decode(b"NWFIRkZRbFJuVlE9PQ==")
+    ).decode("iso-8859-1")
+
+    client_unique_key = secrets.token_hex(8)
+
+    # Build the authorization URL (using TIDAL's redirect URI)
+    auth_url = (
+        f"https://login.tidal.com/authorize?"
+        f"response_type=code&"
+        f"redirect_uri=https://tidal.com/android/login/auth&"
+        f"client_id={client_id}&"
+        f"lang=EN&"
+        f"appMode=android&"
+        f"client_unique_key={client_unique_key}&"
+        f"code_challenge={code_challenge}&"
+        f"code_challenge_method=S256&"
+        f"restrict_signup=true"
+    )
+
+    # Open browser automatically
+    console.print("[cyan]Opening browser...[/cyan]")
+    webbrowser.open(auth_url)
+
+    console.print("\n[yellow]Waiting for you to log in and copy the URL...[/yellow]\n")
+
+    # Prompt for the redirect URL
+    try:
+        redirect_url = input(
+            "Paste the 'Oops' page URL here and press <ENTER>: "
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]❌ Authentication cancelled by user.[/yellow]")
+        return
+
+    if not redirect_url:
+        console.print("[red]❌ No URL provided[/red]")
+        return
+
+    # Extract the authorization code from the URL
+    from urllib.parse import parse_qs, urlparse
+
+    try:
+        parsed = urlparse(redirect_url)
+        params = parse_qs(parsed.query)
+
+        if "code" not in params:
+            console.print("[red]❌ No authorization code found in URL[/red]")
+            return
+
+        auth_code = params["code"][0]
+        console.print("[green]✓[/green] Authorization code extracted")
+
+    except Exception as e:
+        console.print(f"[red]❌ Failed to parse URL: {e}[/red]")
+        return
+
+    # Exchange code for tokens
+    console.print("[dim]Exchanging code for tokens...[/dim]")
+
+    try:
+        import requests
+
+        token_data = {
+            "client_id": client_id,
+            "code": auth_code,
+            "code_verifier": code_verifier,
+            "grant_type": "authorization_code",
+            "redirect_uri": "https://tidal.com/android/login/auth",
+            "scope": "r_usr w_usr w_sub",
+        }
+
+        token_response = requests.post(
+            "https://auth.tidal.com/v1/oauth2/token", data=token_data
+        ).json()
+
+        if "access_token" not in token_response:
+            console.print(f"[red]❌ Token exchange failed: {token_response}[/red]")
+            return
+
+        # Set tokens in session
+        session.access_token = token_response["access_token"]
+        session.refresh_token = token_response["refresh_token"]
+        session.token_type = token_response.get("token_type", "Bearer")
+        session.expiry_time = token_response.get("expires_in", 86400) + time.time()
+
+        # Load user info
+        session.load_session()
+
+    except Exception as e:
+        console.print(f"[red]❌ Token exchange failed: {e}[/red]")
+        return
+
+    # Check if login was successful
+    if not session.check_login():
+        console.print("[red]❌ Authentication failed![/red]")
+        return
+
+    console.print("\n[green]✅ Authentication successful![/green]")
+
+    # Extract tokens
+    user_id = session.user.id
+    access_token = session.access_token
+    refresh_token = session.refresh_token
+
+    # Get country code from current config or use default
+    country_code = "BR"  # Default
+    try:
+        with open(config_path, "r") as f:
+            content = f.read()
+            match = re.search(r'country_code = "([^"]+)"', content)
+            if match and match.group(1):
+                country_code = match.group(1)
+    except Exception:
+        pass
+
+    # Calculate expiry (tokens last 1 week)
+    token_expiry = time.time() + (7 * 24 * 60 * 60)
+
+    console.print(f"\n[dim]User ID:[/dim] {user_id}")
+    console.print(f"[dim]Country Code:[/dim] {country_code}")
+    console.print(f"[dim]Token Expiry:[/dim] {token_expiry}")
+
+    # Update config file
+    console.print(f"\n[blue]📝 Updating config file:[/blue] {config_path}")
+
+    try:
+        with open(config_path, "r") as f:
+            content = f.read()
+
+        # Update each field
+        content = re.sub(r'user_id = "[^"]*"', f'user_id = "{user_id}"', content)
+        content = re.sub(r"user_id = \d+", f'user_id = "{user_id}"', content)
+        content = re.sub(
+            r'country_code = "[^"]*"', f'country_code = "{country_code}"', content
+        )
+        content = re.sub(
+            r'access_token = "[^"]*"', f'access_token = "{access_token}"', content
+        )
+        content = re.sub(
+            r'refresh_token = "[^"]*"', f'refresh_token = "{refresh_token}"', content
+        )
+        content = re.sub(
+            r"token_expiry = [0-9.]*", f"token_expiry = {token_expiry}", content
+        )
+
+        # Write back to file
+        with open(config_path, "w") as f:
+            f.write(content)
+
+        console.print("[green]✅ Config file updated successfully![/green]")
+
+        console.print("\n" + "=" * 60)
+        console.print("[bold green]🎉 TIDAL authentication complete![/bold green]")
+        console.print("=" * 60)
+        console.print("You can now use streamrip with TIDAL:")
+        console.print("  [cyan]rip tidal list-playlists[/cyan]")
+        console.print("  [cyan]rip tidal list-albums[/cyan]")
+        console.print("  [cyan]rip url <tidal-url>[/cyan]")
+        console.print("=" * 60 + "\n")
+
+    except Exception as e:
+        console.print(f"[red]❌ Failed to update config: {e}[/red]")
 
 
 @tidal.command("list-playlists")

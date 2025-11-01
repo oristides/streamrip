@@ -1,11 +1,11 @@
 repos:
-  # Ruff - Fast Python linter and formatter
+  # Ruff - Fast Python linter (with auto-fix)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.1.6
     hooks:
       - id: ruff
         args: [--fix]
-      - id: ruff-format
+      # ruff-format removed - black handles formatting
 
   # Black - Python code formatter
   - repo: https://github.com/psf/black
@@ -13,13 +13,7 @@ repos:
     hooks:
       - id: black
         language_version: python3
-
-  # isort - Import sorting
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        args: ["--profile", "black"]
+        # Black runs after ruff, so imports are already sorted by ruff
 
   # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks

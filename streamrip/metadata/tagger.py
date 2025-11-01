@@ -249,7 +249,41 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
     else:
         raise Exception(f"Invalid extension {ext}")
 
-    audio = container.get_mutagen_class(path)
+    try:
+        audio = container.get_mutagen_class(path)
+    except Exception as e:
+        # If the file format doesn't match the extension, try to detect actual format
+        error_msg = str(e)
+        if "is not a valid" in error_msg.lower() or "not a valid" in error_msg.lower():
+            # Try to detect actual format by testing with different containers
+            logger.warning(
+                f"File format mismatch for {path}, attempting format detection..."
+            )
+            detected_container = None
+            for test_container in [Container.AAC, Container.MP3, Container.FLAC]:
+                try:
+                    test_audio = test_container.get_mutagen_class(path)
+                    # If successful, use this container instead
+                    detected_container = test_container
+                    audio = test_audio
+                    logger.info(
+                        f"Detected actual format: {test_container.name} for {path}"
+                    )
+                    break
+                except Exception:
+                    continue
+
+            if detected_container is None:
+                # If all formats failed, raise the original error
+                raise Exception(
+                    f"Could not determine file format for {path}: {error_msg}"
+                )
+
+            # Update container to the detected one
+            container = detected_container
+        else:
+            raise
+
     tags = container.get_tag_pairs(meta)
     logger.debug("Tagging with %s", tags)
     container.tag_audio(audio, tags)

@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from json import JSONDecodeError
+from xml.etree import ElementTree as ET  # noqa: N817
 
 import aiohttp
 
@@ -18,9 +19,10 @@ logger = logging.getLogger("streamrip")
 BASE = "https://api.tidalhifi.com/v1"
 AUTH_URL = "https://auth.tidal.com/v1/oauth2"
 
-CLIENT_ID = base64.b64decode("elU0WEhWVmtjMnREUG80dA==").decode("iso-8859-1")
+# NEW WORKING CREDENTIALS from omnunum's fixed version
+CLIENT_ID = base64.b64decode("ZlgySnhkbW50WldLMGl4VA==").decode("iso-8859-1")
 CLIENT_SECRET = base64.b64decode(
-    "VkpLaERGcUpQcXZzUFZOQlY2dWtYVEptd2x2YnR0UDd3bE1scmM3MnNlND0=",
+    "MU5tNUFmREFqeHJnSkZKYktOV0xlQXlLR1ZHbUlOdVhQUExIVlhBdnhBZz0=",
 ).decode("iso-8859-1")
 AUTH = aiohttp.BasicAuth(login=CLIENT_ID, password=CLIENT_SECRET)
 STREAM_URL_REGEX = re.compile(
@@ -34,7 +36,7 @@ QUALITY_MAP = {
     0: "LOW",  # AAC
     1: "HIGH",  # AAC
     2: "LOSSLESS",  # CD Quality
-    3: "HI_RES",  # MQA
+    3: "HI_RES_LOSSLESS",  # Hi-Res (was MQA, now lossless)
 }
 
 
@@ -128,8 +130,8 @@ class TidalClient(Client):
                     item["lyrics"] = resp.get("lyrics") or ""
                 else:
                     item["lyrics"] = resp.get("subtitles") or resp.get("lyrics") or ""
-            except TypeError as e:
-                logger.warning(f"Failed to get lyrics for {item_id}: {e}")
+            except (TypeError, Exception) as e:
+                logger.warning(f"Failed to get lyrics for {item_id}: {e!s}")
 
         logger.debug(item)
         return item
@@ -376,35 +378,119 @@ class TidalClient(Client):
         return []
 
     async def get_downloadable(self, track_id: str, quality: int):
-        params = {
-            "audioquality": QUALITY_MAP[quality],
-            "playbackmode": "STREAM",
-            "assetpresentation": "FULL",
-        }
-        resp = await self._api_request(
-            f"tracks/{track_id}/playbackinfopostpaywall", params
-        )
-        logger.debug(resp)
-        try:
-            manifest = json.loads(base64.b64decode(resp["manifest"]).decode("utf-8"))
-        except KeyError:
-            raise Exception(resp["userMessage"])
-        except JSONDecodeError:
-            logger.warning(
-                (f"Failed to get manifest for {track_id}. Retrying with lower quality.")
-            )
-            return await self.get_downloadable(track_id, quality - 1)
+        # Map generic quality int to Tidal-specific format
+        quality_map = ["LOW", "HIGH", "LOSSLESS", "HI_RES_LOSSLESS"]
 
-        logger.debug(manifest)
-        enc_key = manifest.get("keyId")
-        if manifest.get("encryptionType") == "NONE":
-            enc_key = None
-        return TidalDownloadable(
-            self.session,
-            url=manifest["urls"][0],
-            codec=manifest["codecs"],
-            encryption_key=enc_key,
-            restrictions=manifest.get("restrictions"),
+        # Fallback order: 3 → 2 → 1 → 0 (will go all the way down if needed)
+        fallback_qualities = [3, 2, 1, 0]
+        if quality not in fallback_qualities:
+            fallback_qualities = [quality]
+        else:
+            # Start from requested quality and go down
+            start_idx = fallback_qualities.index(quality)
+            fallback_qualities = fallback_qualities[start_idx:]
+
+        last_error = None
+        last_quality = quality
+
+        for attempt_quality in fallback_qualities:
+            tidal_quality = quality_map[attempt_quality]
+
+            params = {
+                "audioquality": tidal_quality,
+                "playbackmode": "STREAM",
+                "assetpresentation": "FULL",
+            }
+
+            try:
+                resp = await self._api_request(
+                    f"tracks/{track_id}/playbackinfo", params
+                )
+                manifest_b64 = resp["manifest"]
+                manifest_mime = resp.get(
+                    "manifestMimeType", "application/vnd.tidal.bts"
+                )
+
+                # Parse manifest based on MIME type
+                if manifest_mime == "application/dash+xml":
+                    manifest_data = await self._parse_dash_manifest(manifest_b64)
+                else:  # application/vnd.tidal.bts or fallback
+                    manifest_decoded = base64.b64decode(manifest_b64).decode("utf-8")
+                    manifest_data = json.loads(manifest_decoded)
+
+            except (KeyError, JSONDecodeError, NonStreamableError) as e:
+                error_msg = (
+                    resp.get("userMessage", str(e)) if "resp" in locals() else str(e)
+                )
+                last_error = e
+                last_quality = attempt_quality
+
+                # If fallback is enabled and not the last quality, try next
+                if (
+                    self.config.lower_quality_if_not_available
+                    and attempt_quality != fallback_qualities[-1]
+                ):
+                    logger.warning(
+                        f"Quality {attempt_quality} not available for track "
+                        f"{track_id}, trying quality {attempt_quality - 1}"
+                    )
+                    continue
+                else:
+                    # No more fallbacks or fallback disabled
+                    if isinstance(e, KeyError):
+                        raise Exception(f"Missing manifest data: {error_msg}")
+                    elif isinstance(e, NonStreamableError):
+                        raise
+                    else:  # JSONDecodeError
+                        raise Exception(
+                            f"Failed to decode manifest for track "
+                            f"{track_id}: {error_msg}"
+                        )
+
+            # Handle both single URL and URL list formats
+            urls = manifest_data.get("urls", [])
+            if isinstance(urls, list) and len(urls) > 0:
+                url = urls[0] if not isinstance(urls[0], list) else urls
+            else:
+                url = None
+
+            # If URL is None and fallback is enabled, try next quality
+            if url is None:
+                if (
+                    self.config.lower_quality_if_not_available
+                    and attempt_quality != fallback_qualities[-1]
+                ):
+                    logger.warning(
+                        f"Quality {attempt_quality} returned no URL for track "
+                        f"{track_id}, trying quality {attempt_quality - 1}"
+                    )
+                    continue
+                else:
+                    # No URL and no more fallbacks
+                    raise NonStreamableError(
+                        f"No stream URL available for track {track_id} "
+                        f"at quality {attempt_quality}"
+                    )
+
+            # Success - return downloadable with this quality
+            if attempt_quality != quality:
+                logger.info(
+                    f"Downloading track {track_id} at quality {attempt_quality} "
+                    f"(requested {quality} was not available)"
+                )
+
+            return TidalDownloadable(
+                self.session,
+                url=url,
+                codec=manifest_data["codecs"],
+                restrictions=manifest_data.get("restrictions"),
+            )
+
+        # Should never reach here, but handle just in case
+        if last_error:
+            raise last_error
+        raise NonStreamableError(
+            f"Could not get downloadable for track {track_id} at any quality"
         )
 
     async def get_video_file_url(self, video_id: str) -> str:
@@ -421,9 +507,7 @@ class TidalClient(Client):
             "playbackmode": "STREAM",
             "assetpresentation": "FULL",
         }
-        resp = await self._api_request(
-            f"videos/{video_id}/playbackinfopostpaywall", params=params
-        )
+        resp = await self._api_request(f"videos/{video_id}/playbackinfo", params=params)
         manifest = json.loads(base64.b64decode(resp["manifest"]).decode("utf-8"))
         async with self.session.get(manifest["urls"][0]) as resp:
             available_urls = await resp.json()
@@ -433,6 +517,69 @@ class TidalClient(Client):
         *_, last_match = STREAM_URL_REGEX.finditer(available_urls.text)
 
         return last_match.group(1)
+
+    async def _parse_dash_manifest(self, manifest_b64: str) -> dict:
+        """Parse DASH XML manifest into a format compatible with TidalDownloadable.
+
+        DASH manifests use MPEG-DASH format with segment templates.
+        Returns a dict with: urls (list of segment URLs), codecs, encryptionType
+        """
+        try:
+            manifest_xml = base64.b64decode(manifest_b64).decode("utf-8")
+            root = ET.fromstring(manifest_xml)
+
+            # Define XML namespace for DASH
+            ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
+
+            # Find the first Representation element (highest quality is typically listed first or last)
+            representation = root.find(".//mpd:Representation", ns)
+            if representation is None:
+                raise Exception("No Representation found in DASH manifest")
+
+            # Extract codec info
+            codecs = representation.get("codecs", "flac")
+
+            # Find SegmentTemplate
+            segment_template = representation.find(".//mpd:SegmentTemplate", ns)
+            if segment_template is None:
+                raise Exception("No SegmentTemplate found in DASH manifest")
+
+            # Get media URL template
+            media_template = segment_template.get("media")
+            start_number = int(segment_template.get("startNumber", "0"))
+
+            # Get SegmentTimeline to determine number of segments
+            timeline = segment_template.find("mpd:SegmentTimeline", ns)
+            if timeline is None:
+                raise Exception("No SegmentTimeline found in DASH manifest")
+
+            segments = timeline.findall("mpd:S", ns)
+
+            # Calculate total number of segments from timeline
+            segment_urls = []
+            segment_number = start_number
+
+            for seg in segments:
+                repeat = int(seg.get("r", "0"))
+                # r=-1 means repeat until end, r=0 means 1 segment, r=N means N+1 segments
+                num_segments = repeat + 1 if repeat >= 0 else 1
+
+                for _ in range(num_segments):
+                    # Replace $Number$ placeholder with actual segment number
+                    url = media_template.replace("$Number$", str(segment_number))
+                    segment_urls.append(url)
+                    segment_number += 1
+
+            # Return in BTS manifest-compatible format
+            return {
+                "urls": segment_urls,
+                "codecs": codecs,
+                "encryptionType": "NONE",  # DASH manifests from tiddl analysis show no encryption
+                "mimeType": f"audio/{codecs}",
+            }
+
+        except ET.ParseError as e:
+            raise Exception(f"Failed to parse DASH XML manifest: {e}")
 
     # ---------- Login Utilities ---------------
 

@@ -1,6 +1,6 @@
 [downloads]
 # Folder where tracks are downloaded to
-folder = ""
+folder = "/media/oriel/dataextra/complete_music"
 # Put Qobuz albums in a 'Qobuz' folder, Tidal albums in 'Tidal' etc.
 source_subdirectories = false
 # Put tracks in an album with 2 or more discs into a subfolder named `Disc N`
@@ -41,6 +41,9 @@ secrets = []
 [tidal]
 # 0: 256kbps AAC, 1: 320kbps AAC, 2: 16/44.1 "HiFi" FLAC, 3: 24/44.1 "MQA" FLAC
 quality = 3
+# If the target quality is not available, fallback to best quality available
+# Fallback order: 3 → 2 → 1 → 0 (will go all the way down if needed)
+lower_quality_if_not_available = true
 # This will download videos included in Video Albums.
 download_videos = true
 

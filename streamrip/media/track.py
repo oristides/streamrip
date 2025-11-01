@@ -47,7 +47,12 @@ class Track(Media):
                 f"Track {self.meta.tracknumber}",
             ) as callback:
                 try:
-                    await self.downloadable.download(self.download_path, callback)
+                    actual_path = await self.downloadable.download(
+                        self.download_path, callback
+                    )
+                    # Update download_path if format was corrected during download
+                    if str(actual_path) != str(self.download_path):
+                        self.download_path = str(actual_path)
                     retry = False
                 except Exception as e:
                     logger.error(
@@ -64,7 +69,12 @@ class Track(Media):
                 f"Track {self.meta.tracknumber} (retry)",
             ) as callback:
                 try:
-                    await self.downloadable.download(self.download_path, callback)
+                    actual_path = await self.downloadable.download(
+                        self.download_path, callback
+                    )
+                    # Update download_path if format was corrected during download
+                    if str(actual_path) != str(self.download_path):
+                        self.download_path = str(actual_path)
                 except Exception as e:
                     logger.error(
                         f"Persistent error downloading track '{self.meta.title}', skipping: {e}"

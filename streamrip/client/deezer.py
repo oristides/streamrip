@@ -161,7 +161,7 @@ class DeezerClient(Client):
             int(track_info.get(f"FILESIZE_{format}", 0)) for _, format in quality_map
         ]
         dl_info["quality_to_size"] = size_map
-        
+
         # Check if requested quality is available
         if size_map[quality] == 0:
             if self.config.lower_quality_if_not_available:
@@ -178,7 +178,7 @@ class DeezerClient(Client):
                 raise NonStreamableError(
                     f"The requested quality {quality} is not available and fallback is disabled."
                 )
-        
+
         # Update the quality in dl_info to reflect the final quality used
         dl_info["quality"] = quality
 

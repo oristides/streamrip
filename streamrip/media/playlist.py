@@ -247,6 +247,8 @@ class PendingLastfmPlaylist(Pending):
             results: list[tuple[str | None, bool]] = await asyncio.gather(*requests)
 
         parent = self.config.session.downloads.folder
+        # Route Last.fm playlists into dedicated subfolder
+        parent = os.path.join(parent, "playlists")
         folder = os.path.join(parent, clean_filepath(playlist_title))
 
         pending_tracks = []

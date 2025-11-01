@@ -44,20 +44,21 @@ test-db-runner: ## Run database tests using the custom runner
 	python run_database_tests.py
 
 # Code Quality
-lint: ## Run linting checks
+lint: ## Run linting checks (ruff)
 	poetry run ruff check streamrip/ tests/
 
-format: ## Format code with ruff
-	poetry run ruff format streamrip/ tests/
-
-format-check: ## Check code formatting
-	poetry run ruff format --check streamrip/ tests/
-
-ruff-check: ## Run ruff linting only
-	poetry run ruff check streamrip/ tests/
-
-ruff-fix: ## Fix ruff issues automatically
+format: ## Format code with ruff (lint+fix) and black
 	poetry run ruff check --fix streamrip/ tests/
+	poetry run black streamrip/ tests/
+	@echo "✅ Code formatted with ruff (lint+fix) and black!"
+
+format-check: ## Check code formatting (ruff lint + black format)
+	poetry run ruff check streamrip/ tests/
+	poetry run black --check streamrip/ tests/
+	@echo "✅ Formatting checks passed!"
+
+fix: format ## Fix all issues and format code (alias for format)
+	@echo "✅ All code issues fixed and formatted!"
 
 # Pre-commit
 pre-commit-install: ## Install pre-commit hooks
@@ -204,7 +205,7 @@ test-dev: test-db-runner test-coverage ## Complete test development workflow
 	@echo "Test development workflow complete!"
 
 # All-in-one Commands
-all: format lint test ## Run everything: format, lint, and test
+all: format-check lint test ## Run everything: format check, lint, and test
 	@echo "🎉 All checks passed! Code is ready!"
 
 all-tests: test test-coverage lint ## Run all tests and checks
@@ -231,3 +232,10 @@ help-db: ## Show database-related commands
 help-dev: ## Show development-related commands
 	@echo "Development Commands:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E "(dev|install|format|lint)" | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+# User Commands
+compare-playlists: ## Compare TIDAL playlists vs local (missing only)
+	poetry run rip tidal compare --playlists --missing-only
+
+download-playlists: ## Download missing tracks from TIDAL playlists
+	poetry run rip tidal download-missing --playlists
