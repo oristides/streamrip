@@ -33,19 +33,32 @@ logger = logging.getLogger("streamrip")
 
 def safe_log_error(message: str, *args):
     """Safely log error messages with fallback to console if logging fails."""
+    # Always pre-format with f-strings to avoid % format issues with logger
     try:
         if args:
-            logger.error(message, *args)
+            # Format using f-string to avoid % format issues
+            formatted_msg = f"{message} {' '.join(str(a) for a in args)}"
         else:
-            logger.error(message)
+            formatted_msg = str(message)
+
+        # Check if message might contain format chars that could break logger
+        # Python's logging uses % formatting internally, so escape % if present
+        if "%" in formatted_msg and not args:
+            # Replace % with %% to escape for logger's % formatting
+            formatted_msg = formatted_msg.replace("%", "%%")
+
+        logger.error(formatted_msg)
     except Exception as e:
         # If logging fails, use console.print as fallback
         try:
-            formatted_msg = message % args if args else message
-        except (TypeError, ValueError):
-            formatted_msg = str(message)
+            if args:
+                formatted_msg = f"{message} {' '.join(str(a) for a in args)}"
+            else:
+                formatted_msg = str(message)
+        except Exception:
+            formatted_msg = "Error (unable to format message)"
         console.print(f"[red]Error: {formatted_msg}[/red]")
-        console.print(f"[yellow]Logging system error: {e}[/yellow]")
+        console.print(f"[yellow]Logging system error: {type(e).__name__}[/yellow]")
 
 
 def safe_log_info(message: str, *args):
@@ -331,7 +344,32 @@ class Main:
                 if result is not None and not isinstance(result, Exception):
                     new_media.append(result)
                 elif isinstance(result, Exception):
-                    safe_log_error(f"Error resolving pending item: {result}")
+                    # Safely log exception - don't try to convert to string as it might
+                    # contain format characters that cause the same error
+                    error_type = type(result).__name__
+
+                    # Try to get traceback info if available
+                    try:
+                        import traceback
+
+                        tb_lines = traceback.format_exception(
+                            type(result), result, result.__traceback__
+                        )
+                        # Get just the last frame that's not in our error handling code
+                        for line in reversed(tb_lines):
+                            if "main.py" not in line or "safe_log_error" not in line:
+                                # Extract file and line info
+                                if '.py":' in line:
+                                    file_info = (
+                                        line.split('.py":')[0].split("/")[-1] + ".py"
+                                    )
+                                    console.print(f"[red]Error in {file_info}[/red]")
+                                break
+                    except Exception:
+                        pass
+
+                    # Log just the error type
+                    safe_log_error(f"Error resolving pending item: {error_type}")
 
         # Update pending list to remaining items
         self.pending = remaining

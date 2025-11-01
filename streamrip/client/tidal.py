@@ -130,10 +130,19 @@ class TidalClient(Client):
                     item["lyrics"] = resp.get("lyrics") or ""
                 else:
                     item["lyrics"] = resp.get("subtitles") or resp.get("lyrics") or ""
-            except (TypeError, Exception) as e:
-                logger.warning(f"Failed to get lyrics for {item_id}: {e!s}")
+            except NonStreamableError:
+                # Lyrics endpoint returns 404 for tracks without lyrics (very common)
+                # This is normal and not an error - silently skip
+                item["lyrics"] = ""
+            except Exception as e:
+                # Other exceptions (network errors, etc) - log at debug level
+                error_type = type(e).__name__
+                logger.debug(f"Failed to get lyrics for {item_id}: {error_type}")
+                item["lyrics"] = ""  # Set empty lyrics on error
 
-        logger.debug(item)
+        # Don't log the full item as it might contain format characters
+        # that break Python's logging system (which uses % formatting)
+        logger.debug(f"Metadata retrieved for track {item_id}")
         return item
 
     async def get_user_playlists(self) -> list[dict]:
@@ -396,95 +405,162 @@ class TidalClient(Client):
         for attempt_quality in fallback_qualities:
             tidal_quality = quality_map[attempt_quality]
 
-            params = {
-                "audioquality": tidal_quality,
-                "playbackmode": "STREAM",
-                "assetpresentation": "FULL",
-            }
+            # Try DOWNLOAD mode first for complete files, fallback to STREAM if needed
+            # DOWNLOAD mode returns complete files, STREAM mode can return fragments
+            playback_modes = ["DOWNLOAD", "STREAM"]
+            playback_error = None
 
-            try:
-                resp = await self._api_request(
-                    f"tracks/{track_id}/playbackinfo", params
-                )
-                manifest_b64 = resp["manifest"]
-                manifest_mime = resp.get(
-                    "manifestMimeType", "application/vnd.tidal.bts"
-                )
+            for playback_mode in playback_modes:
+                params = {
+                    "audioquality": tidal_quality,
+                    "playbackmode": playback_mode,
+                    "assetpresentation": "FULL",
+                }
 
-                # Parse manifest based on MIME type
-                if manifest_mime == "application/dash+xml":
-                    manifest_data = await self._parse_dash_manifest(manifest_b64)
-                else:  # application/vnd.tidal.bts or fallback
-                    manifest_decoded = base64.b64decode(manifest_b64).decode("utf-8")
-                    manifest_data = json.loads(manifest_decoded)
-
-            except (KeyError, JSONDecodeError, NonStreamableError) as e:
-                error_msg = (
-                    resp.get("userMessage", str(e)) if "resp" in locals() else str(e)
-                )
-                last_error = e
-                last_quality = attempt_quality
-
-                # If fallback is enabled and not the last quality, try next
-                if (
-                    self.config.lower_quality_if_not_available
-                    and attempt_quality != fallback_qualities[-1]
-                ):
-                    logger.warning(
-                        f"Quality {attempt_quality} not available for track "
-                        f"{track_id}, trying quality {attempt_quality - 1}"
+                try:
+                    resp = await self._api_request(
+                        f"tracks/{track_id}/playbackinfo", params
                     )
-                    continue
-                else:
-                    # No more fallbacks or fallback disabled
-                    if isinstance(e, KeyError):
-                        raise Exception(f"Missing manifest data: {error_msg}")
-                    elif isinstance(e, NonStreamableError):
-                        raise
-                    else:  # JSONDecodeError
-                        raise Exception(
-                            f"Failed to decode manifest for track "
-                            f"{track_id}: {error_msg}"
+                    manifest_b64 = resp["manifest"]
+                    manifest_mime = resp.get(
+                        "manifestMimeType", "application/vnd.tidal.bts"
+                    )
+
+                    # Parse manifest based on MIME type
+                    if manifest_mime == "application/dash+xml":
+                        manifest_data = await self._parse_dash_manifest(manifest_b64)
+                        logger.debug(
+                            f"Parsed DASH manifest for track {track_id}: "
+                            f"{len(manifest_data.get('urls', []))} segments"
+                        )
+                    else:  # application/vnd.tidal.bts or fallback
+                        manifest_decoded = base64.b64decode(manifest_b64).decode(
+                            "utf-8"
+                        )
+                        manifest_data = json.loads(manifest_decoded)
+                        logger.debug(
+                            f"Parsed BTS manifest for track {track_id}: "
+                            f"URL count: {len(manifest_data.get('urls', []))}"
                         )
 
-            # Handle both single URL and URL list formats
-            urls = manifest_data.get("urls", [])
-            if isinstance(urls, list) and len(urls) > 0:
-                url = urls[0] if not isinstance(urls[0], list) else urls
-            else:
-                url = None
-
-            # If URL is None and fallback is enabled, try next quality
-            if url is None:
-                if (
-                    self.config.lower_quality_if_not_available
-                    and attempt_quality != fallback_qualities[-1]
-                ):
-                    logger.warning(
-                        f"Quality {attempt_quality} returned no URL for track "
-                        f"{track_id}, trying quality {attempt_quality - 1}"
+                except (KeyError, JSONDecodeError, NonStreamableError) as e:
+                    error_msg = (
+                        resp.get("userMessage", str(e))
+                        if "resp" in locals()
+                        else str(e)
                     )
-                    continue
+                    playback_error = e
+
+                    # Try next playback mode if available
+                    if playback_mode != playback_modes[-1]:
+                        logger.debug(
+                            f"Playback mode {playback_mode} failed for track "
+                            f"{track_id}, trying {playback_modes[1]}"
+                        )
+                        continue
+                    else:
+                        # Both playback modes failed, try next quality
+                        last_error = playback_error
+                        last_quality = attempt_quality
+
+                        # If fallback is enabled and not the last quality, try next
+                        if (
+                            self.config.lower_quality_if_not_available
+                            and attempt_quality != fallback_qualities[-1]
+                        ):
+                            logger.warning(
+                                f"Quality {attempt_quality} not available for track "
+                                f"{track_id}, trying quality {attempt_quality - 1}"
+                            )
+                            break  # Break out of playback_mode loop
+                        else:
+                            # No more fallbacks or fallback disabled
+                            if isinstance(e, KeyError):
+                                raise Exception(f"Missing manifest data: {error_msg}")
+                            elif isinstance(e, NonStreamableError):
+                                raise
+                            else:  # JSONDecodeError
+                                raise Exception(
+                                    f"Failed to decode manifest for track "
+                                    f"{track_id}: {error_msg}"
+                                )
+
+                # Handle both single URL and URL list formats
+                urls = manifest_data.get("urls", [])
+                if isinstance(urls, list) and len(urls) > 0:
+                    # DASH manifests return a list of segment URLs that need to be concatenated
+                    # BTS manifests return a single URL or list with one URL
+
+                    # Check if we have multiple segments (DASH format)
+                    # DASH can have: urls = [url1, url2, url3, ...] (list of strings)
+                    # Or: urls = [[url1, url2, ...]] (list containing a list)
+                    has_multiple_segments = len(urls) > 1
+                    if not has_multiple_segments and isinstance(urls[0], list):
+                        has_multiple_segments = len(urls[0]) > 1
+
+                    if has_multiple_segments:
+                        # Multiple segments - DASH manifest requires downloading all segments
+                        segment_list = urls[0] if isinstance(urls[0], list) else urls
+                        logger.info(
+                            f"DASH manifest detected for track {track_id}: "
+                            f"{len(segment_list)} segments will be downloaded and concatenated"
+                        )
+                        url = segment_list  # Pass list of URLs to TidalDownloadable
+                    else:
+                        # Single URL (BTS manifest or single segment)
+                        url = urls[0] if not isinstance(urls[0], list) else urls[0][0]
+                        logger.debug(
+                            f"Single URL manifest for track {track_id}: {url[:80]}..."
+                        )
                 else:
-                    # No URL and no more fallbacks
-                    raise NonStreamableError(
-                        f"No stream URL available for track {track_id} "
-                        f"at quality {attempt_quality}"
+                    url = None
+
+                # If URL is None, try next playback mode
+                if url is None:
+                    if playback_mode != playback_modes[-1]:
+                        logger.debug(
+                            f"Playback mode {playback_mode} returned no URL for "
+                            f"track {track_id}, trying {playback_modes[1]}"
+                        )
+                        continue
+                    else:
+                        # Both playback modes returned no URL, try next quality
+                        if (
+                            self.config.lower_quality_if_not_available
+                            and attempt_quality != fallback_qualities[-1]
+                        ):
+                            logger.warning(
+                                f"Quality {attempt_quality} returned no URL for "
+                                f"track {track_id}, trying quality "
+                                f"{attempt_quality - 1}"
+                            )
+                            break  # Break out of playback_mode loop
+                        else:
+                            # No URL and no more fallbacks
+                            raise NonStreamableError(
+                                f"No stream URL available for track {track_id} "
+                                f"at quality {attempt_quality}"
+                            )
+
+                # Success - return downloadable with this quality and playback mode
+                if attempt_quality != quality:
+                    logger.info(
+                        f"Downloading track {track_id} at quality "
+                        f"{attempt_quality} (requested {quality} was not "
+                        f"available) using {playback_mode} mode"
+                    )
+                elif playback_mode == "DOWNLOAD":
+                    logger.debug(
+                        f"Using DOWNLOAD mode for track {track_id} "
+                        "(complete file, not fragmented)"
                     )
 
-            # Success - return downloadable with this quality
-            if attempt_quality != quality:
-                logger.info(
-                    f"Downloading track {track_id} at quality {attempt_quality} "
-                    f"(requested {quality} was not available)"
+                return TidalDownloadable(
+                    self.session,
+                    url=url,
+                    codec=manifest_data["codecs"],
+                    restrictions=manifest_data.get("restrictions"),
                 )
-
-            return TidalDownloadable(
-                self.session,
-                url=url,
-                codec=manifest_data["codecs"],
-                restrictions=manifest_data.get("restrictions"),
-            )
 
         # Should never reach here, but handle just in case
         if last_error:
@@ -724,7 +800,10 @@ class TidalClient(Client):
         async with self.rate_limiter:
             async with self.session.get(f"{base}/{path}", params=params) as resp:
                 if resp.status == 404:
-                    logger.warning("TIDAL: track not found", resp)
+                    # Don't log warning for lyrics endpoint - 404 is normal when no lyrics exist
+                    # Only log for actual track/album/etc endpoints
+                    if "/lyrics" not in path:
+                        logger.warning(f"TIDAL: track not found (status {resp.status})")
                     raise NonStreamableError("TIDAL: Track not found")
                 resp.raise_for_status()
                 return await resp.json()
@@ -856,6 +935,40 @@ class TidalClient(Client):
                         track_id = track.get("id")
                         if track_id:
                             missing_urls.append(f"https://tidal.com/track/{track_id}")
+
+        if albums:
+            console.print("[blue]💿 Getting missing tracks from albums...")
+            albums_data = await self.get_user_albums()
+            for album in albums_data:
+                tracks = await self._get_album_tracks(album["id"])
+                missing = self._find_missing_tracks(tracks, db)
+                for track in missing:
+                    track_id = track.get("id")
+                    if track_id:
+                        missing_urls.append(f"https://tidal.com/track/{track_id}")
+
+            if recommended:
+                console.print(
+                    "[blue]🎯 Getting missing tracks from recommended albums..."
+                )
+                rec_albums = await self.get_recommended_albums()
+                for album in rec_albums:
+                    tracks = await self._get_album_tracks(album["id"])
+                    missing = self._find_missing_tracks(tracks, db)
+                    for track in missing:
+                        track_id = track.get("id")
+                        if track_id:
+                            missing_urls.append(f"https://tidal.com/track/{track_id}")
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_urls = []
+        for url in missing_urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+
+        return unique_urls
 
     async def get_missing_tracks_with_context(
         self, playlists=False, albums=False, recommended=False, db=None

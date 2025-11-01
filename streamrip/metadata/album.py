@@ -78,7 +78,22 @@ class AlbumMetadata:
             "container": self.info.container,
         }
 
-        return clean_filepath(formatter.format(**info))
+        try:
+            return clean_filepath(formatter.format(**info))
+        except (ValueError, KeyError, TypeError):
+            # Fallback if format string fails (e.g., contains % chars)
+            # Escape any % characters in values to prevent format errors
+            safe_info = {}
+            for key, value in info.items():
+                if isinstance(value, str) and "%" in value:
+                    safe_info[key] = value.replace("%", "%%")
+                else:
+                    safe_info[key] = value
+            try:
+                return clean_filepath(formatter.format(**safe_info))
+            except Exception:
+                # Ultimate fallback - use simple format
+                return f"{info.get('albumartist', 'Unknown')} - {info.get('title', 'Unknown')}"
 
     @classmethod
     def from_qobuz(cls, resp: dict) -> AlbumMetadata:

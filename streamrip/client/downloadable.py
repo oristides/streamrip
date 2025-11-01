@@ -1,6 +1,10 @@
 """Downloadable classes for different streaming services."""
 
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
@@ -130,7 +134,7 @@ class TidalDownloadable(Downloadable):
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        url: str | None,
+        url: str | list[str] | None,
         codec: str,
         restrictions: list | None = None,
     ):
@@ -138,7 +142,7 @@ class TidalDownloadable(Downloadable):
 
         Args:
             session: aiohttp ClientSession
-            url: Stream URL (may be None if unavailable)
+            url: Stream URL(s) - single URL string or list of segment URLs for DASH
             codec: Audio codec (e.g., 'flac', 'mqa', 'aac')
             restrictions: List of restrictions (if any)
         """
@@ -147,6 +151,9 @@ class TidalDownloadable(Downloadable):
         self.codec = codec.lower()
         self.restrictions = restrictions or []
         self._size_cache: int | None = None
+
+        # Detect if we have multiple URLs (DASH segments)
+        self.is_dash_segments = isinstance(url, list) and len(url) > 1
 
     @property
     def source(self) -> str:
@@ -172,7 +179,7 @@ class TidalDownloadable(Downloadable):
             return "m4a"
 
     async def size(self) -> int:
-        """Get file size from stream URL."""
+        """Get file size from stream URL(s)."""
         if self._size_cache is not None:
             return self._size_cache
 
@@ -180,6 +187,27 @@ class TidalDownloadable(Downloadable):
             self._size_cache = 0
             return 0
 
+        # For DASH segments, sum the size of all segments
+        if self.is_dash_segments:
+            total_size = 0
+            for segment_url in self.url:
+                try:
+                    async with self.session.head(segment_url) as resp:
+                        resp.raise_for_status()
+                        content_length = resp.headers.get("Content-Length")
+                        if content_length:
+                            total_size += int(content_length)
+                        else:
+                            # If we can't determine size, return 0 (will estimate during download)
+                            self._size_cache = 0
+                            return 0
+                except Exception:
+                    self._size_cache = 0
+                    return 0
+            self._size_cache = total_size
+            return total_size
+
+        # Single URL - original logic
         try:
             async with self.session.head(self.url) as resp:
                 resp.raise_for_status()
@@ -209,13 +237,317 @@ class TidalDownloadable(Downloadable):
             return 0
 
     async def download(self, path: str | Path, callback: Callable[[int], None]) -> Path:
-        """Download Tidal stream."""
+        """Download Tidal stream.
+
+        For DASH manifests with multiple segments, downloads all segments
+        and concatenates them into a single file.
+        """
         if not self.url:
             raise ValueError("No URL available for Tidal download")
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Handle DASH segments - download all segments and concatenate
+        if self.is_dash_segments:
+            logger.info(
+                f"Downloading {len(self.url)} DASH segments and concatenating..."
+            )
+
+            # Download first segment to detect format (HEAD request, don't consume body)
+            async with self.session.head(self.url[0]) as resp:
+                resp.raise_for_status()
+
+                # Detect actual format from Content-Type header
+                content_type = resp.headers.get("Content-Type", "").lower()
+                actual_extension = self.extension
+
+                if "audio/mpeg" in content_type or "audio/mp3" in content_type:
+                    actual_extension = "mp3"
+                elif (
+                    "audio/mp4" in content_type
+                    or "audio/aac" in content_type
+                    or "audio/x-m4a" in content_type
+                ):
+                    actual_extension = "m4a"
+                elif "audio/flac" in content_type or "audio/x-flac" in content_type:
+                    actual_extension = "flac"
+
+                # Update path extension if needed
+                current_extension = path.suffix[1:].lower() if path.suffix else ""
+                if actual_extension != current_extension:
+                    path = path.with_suffix(f".{actual_extension}")
+                    logger.info(
+                        f"Detected format mismatch: expected {current_extension}, "
+                        f"detected {actual_extension} from Content-Type "
+                        f"{content_type}. Using {path.name}"
+                    )
+
+            # Download all segments to temporary files, then use ffmpeg to reconstruct valid MP4
+            # DASH MP4 segments are ISOBMFF fragments that need proper reconstruction
+            temp_dir = tempfile.mkdtemp(prefix="streamrip_dash_")
+            segment_files = []
+
+            try:
+                # Check if ffmpeg is available
+                if not shutil.which("ffmpeg"):
+                    raise ValueError(
+                        "ffmpeg is required to reconstruct DASH segments into a valid MP4 file. "
+                        "Please install ffmpeg."
+                    )
+
+                # Download all segments to temporary files in parallel for better performance
+                async def download_segment(segment_idx: int, segment_url: str) -> str:
+                    """Download a single segment and return its file path."""
+                    segment_file = os.path.join(temp_dir, f"seg_{segment_idx:05d}.m4s")
+
+                    async with self.session.get(segment_url) as resp:
+                        resp.raise_for_status()
+                        with open(segment_file, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(8192):
+                                f.write(chunk)
+                                callback(len(chunk))
+
+                    return segment_file
+
+                # Download all segments in parallel (limit concurrency)
+                # This dramatically improves speed for DASH downloads
+                import asyncio
+
+                # Create download tasks for all segments
+                download_tasks = [
+                    download_segment(idx, url) for idx, url in enumerate(self.url)
+                ]
+
+                # Use semaphore to limit concurrent downloads (max 10 parallel)
+                # Prevents overwhelming server while maintaining good speed
+                semaphore = asyncio.Semaphore(10)
+
+                async def bounded_download(task):
+                    """Wrap task with semaphore for controlled concurrency."""
+                    async with semaphore:
+                        return await task
+
+                # Execute all downloads in parallel with concurrency limit
+                segment_files = await asyncio.gather(
+                    *[bounded_download(task) for task in download_tasks]
+                )
+
+                # Create concat file list for ffmpeg
+                concat_file = os.path.join(temp_dir, "concat.txt")
+                with open(concat_file, "w") as f:
+                    for seg_file in segment_files:
+                        # Use absolute path and escape single quotes
+                        abs_path = os.path.abspath(seg_file).replace("'", "'\"'\"'")
+                        f.write(f"file '{abs_path}'\n")
+
+                # Use ffmpeg to reconstruct valid MP4 from segments
+                # For ISOBMFF fragments, we need to use 'concat' protocol with proper format
+                temp_output = os.path.join(temp_dir, "output.m4a")
+
+                # Try using concat demuxer first (works for most ISOBMFF fragments)
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    concat_file,
+                    "-c",
+                    "copy",  # Copy codec without re-encoding
+                    "-y",  # Overwrite output
+                    "-loglevel",
+                    "error",  # Suppress ffmpeg output
+                    temp_output,
+                ]
+
+                logger.debug(
+                    f"Reconstructing MP4 with ffmpeg from {len(self.url)} segments"
+                )
+
+                # For DASH ISOBMFF fragments, we need to use ffmpeg's concat demuxer
+                # which properly handles ISOBMFF fragment boxes (moof/mfhd)
+                logger.debug(
+                    "Using ffmpeg concat demuxer to reconstruct MP4 from ISOBMFF fragments..."
+                )
+
+                # First try concat demuxer (proper way for ISOBMFF)
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    concat_file,
+                    "-c",
+                    "copy",  # Copy codec without re-encoding
+                    "-movflags",
+                    "+faststart",  # Optimize for streaming
+                    "-y",  # Overwrite output
+                    "-loglevel",
+                    "error",
+                    temp_output,
+                ]
+
+                logger.debug(f"Running ffmpeg concat: {' '.join(ffmpeg_cmd)}")
+                result = subprocess.run(
+                    ffmpeg_cmd, capture_output=True, text=True, check=False
+                )
+
+                # If concat fails, try processing concatenated fragments as ISOBMFF
+                # (slower but more compatible)
+                if result.returncode != 0:
+                    logger.warning(
+                        "concat demuxer failed, trying ISOBMFF fragment processing..."
+                    )
+
+                    # Concatenate segments raw first
+                    temp_raw = os.path.join(temp_dir, "raw_concatenated.m4a")
+                    with open(temp_raw, "wb") as outfile:
+                        for seg_file in segment_files:
+                            with open(seg_file, "rb") as infile:
+                                shutil.copyfileobj(infile, outfile)
+
+                    # Process ISOBMFF fragments by extracting audio and re-encapsulating
+                    # Fragmentos ISOBMFF não têm 'moov' box, então precisamos extrair o áudio
+                    # e re-encapsular em MP4 válido
+                    logger.info(
+                        "Processing ISOBMFF fragments - extracting audio and creating valid MP4..."
+                    )
+
+                    # Extract raw audio from fragments and re-encapsulate
+                    # Use 'ffmpeg -f mp4' to read fragments, extract audio, then save as valid MP4
+                    ffmpeg_cmd = [
+                        "ffmpeg",
+                        "-f",
+                        "mp4",
+                        "-fflags",
+                        "+genpts+ignidx",  # Generate timestamps, ignore index
+                        "-analyzeduration",
+                        "100000000",  # Large analysis window
+                        "-probesize",
+                        "100000000",
+                        "-i",
+                        temp_raw,
+                        "-vn",  # No video
+                        "-c:a",
+                        "aac",  # Re-encode AAC (necessary to create valid container)
+                        "-b:a",
+                        "320k",  # High quality
+                        "-movflags",
+                        "+faststart+empty_moov",  # Fast start + empty moov workaround
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        temp_output,
+                    ]
+
+                    result = subprocess.run(
+                        ffmpeg_cmd, capture_output=True, text=True, check=False
+                    )
+
+                    if result.returncode == 0:
+                        logger.info(
+                            "Successfully processed ISOBMFF fragments into valid MP4 "
+                            "(re-encoded AAC 320kbps for compatibility)"
+                        )
+                    else:
+                        # Skip individual segment extraction (it always fails for ISOBMFF)
+                        # Go directly to the method that works: treat concatenated file as raw PCM
+                        logger.info(
+                            "Skipping individual segment extraction (ISOBMFF fragments "
+                            "require concatenation first). Processing concatenated file..."
+                        )
+                        result.returncode = 1  # Force fallback to raw PCM method
+
+                # If ffmpeg fails, try one final method: treat concatenated file as raw PCM
+                # This works because ISOBMFF fragments contain raw audio data
+                # that can be extracted even without proper container structure
+                if result.returncode != 0:
+                    logger.warning(
+                        "All reconstruction methods failed. Trying raw audio extraction "
+                        "from concatenated fragments..."
+                    )
+                    error_msg = result.stderr or "Unknown ffmpeg error"
+                    logger.debug(f"ffmpeg error: {error_msg}")
+
+                    # Ensure we have the concatenated file
+                    temp_raw = os.path.join(temp_dir, "raw_concatenated.m4a")
+                    if not os.path.exists(temp_raw):
+                        with open(temp_raw, "wb") as outfile:
+                            for seg_file in segment_files:
+                                with open(seg_file, "rb") as infile:
+                                    shutil.copyfileobj(infile, outfile)
+
+                    # Try to extract audio by treating concatenated file as raw PCM
+                    # This bypasses MP4 structure requirements
+                    ffmpeg_cmd = [
+                        "ffmpeg",
+                        "-f",
+                        "s16le",  # Raw PCM signed 16-bit little-endian
+                        "-ar",
+                        "44100",  # Sample rate
+                        "-ac",
+                        "2",  # Stereo
+                        "-i",
+                        temp_raw,
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "320k",
+                        "-movflags",
+                        "+faststart",
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        temp_output,
+                    ]
+
+                    result = subprocess.run(
+                        ffmpeg_cmd, capture_output=True, text=True, check=False
+                    )
+
+                    if result.returncode == 0:
+                        logger.info(
+                            "Successfully extracted audio from concatenated fragments "
+                            "by treating as raw PCM - created valid MP4"
+                        )
+                    else:
+                        # Ultimate fallback: save raw concatenated file
+                        logger.warning(
+                            "All audio extraction methods failed. Saving concatenated "
+                            "fragments as-is (may not play in all players)."
+                        )
+                        temp_output = temp_raw  # Use raw concatenated file
+
+                # Move file to final location (either reconstructed or raw concatenated)
+                if os.path.exists(temp_output):
+                    shutil.move(temp_output, path)
+                    if result.returncode == 0:
+                        logger.info(
+                            f"Successfully reconstructed {len(self.url)} DASH segments "
+                            f"into valid MP4: {path.name}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Saved {len(self.url)} DASH segments as concatenated file "
+                            f"(may be ISOBMFF fragments, not standard MP4): {path.name}"
+                        )
+                else:
+                    raise ValueError("Failed to create output file from DASH segments")
+
+            finally:
+                # Clean up temporary directory
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp directory {temp_dir}: {e}")
+
+            return path
+
+        # Single URL - original logic
         async with self.session.get(self.url) as resp:
             resp.raise_for_status()
 

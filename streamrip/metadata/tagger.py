@@ -253,8 +253,29 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
         audio = container.get_mutagen_class(path)
     except Exception as e:
         # If the file format doesn't match the extension, try to detect actual format
-        error_msg = str(e)
-        if "is not a valid" in error_msg.lower() or "not a valid" in error_msg.lower():
+        error_msg = str(e).lower()
+
+        # Check if it's an ISOBMFF fragment (DASH segment) - these start with 'moof'
+        # They're valid audio but mutagen can't tag them directly
+        try:
+            with open(path, "rb") as f:
+                header = f.read(12)
+                if len(header) >= 8 and header[4:8] == b"moof":
+                    # This is an ISOBMFF fragment (DASH segment)
+                    # Skip tagging but don't fail - file is valid but not taggable with mutagen
+                    logger.warning(
+                        f"File {path} is an ISOBMFF fragment (DASH segment). "
+                        "Skipping tagging - file is playable but not taggable with mutagen."
+                    )
+                    return  # Skip tagging for DASH fragments
+        except Exception:
+            pass
+
+        if (
+            "is not a valid" in error_msg
+            or "not a valid" in error_msg
+            or "not a mp4" in error_msg
+        ):
             # Try to detect actual format by testing with different containers
             logger.warning(
                 f"File format mismatch for {path}, attempting format detection..."
@@ -274,6 +295,20 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
                     continue
 
             if detected_container is None:
+                # If all formats failed, check if it's a DASH fragment
+                try:
+                    with open(path, "rb") as f:
+                        header = f.read(12)
+                        if len(header) >= 8 and header[4:8] == b"moof":
+                            # ISOBMFF fragment - skip tagging
+                            logger.warning(
+                                f"File {path} appears to be an ISOBMFF fragment. "
+                                "Skipping tagging - file may still be playable."
+                            )
+                            return
+                except Exception:
+                    pass
+
                 # If all formats failed, raise the original error
                 raise Exception(
                     f"Could not determine file format for {path}: {error_msg}"

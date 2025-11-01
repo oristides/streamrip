@@ -247,7 +247,12 @@ class PendingLastfmPlaylist(Pending):
             results: list[tuple[str | None, bool]] = await asyncio.gather(*requests)
 
         parent = self.config.session.downloads.folder
-        # Route Last.fm playlists into dedicated subfolder
+        # Route Last.fm playlists into source-specific subfolder with lastfm
+        # identifier to differentiate from direct source playlists
+        # Get source name from client and capitalize it (e.g., "tidal" -> "Tidal")
+        source_name = self.client.source.capitalize()
+        parent = os.path.join(parent, source_name)
+        parent = os.path.join(parent, "lastfm")
         parent = os.path.join(parent, "playlists")
         folder = os.path.join(parent, clean_filepath(playlist_title))
 

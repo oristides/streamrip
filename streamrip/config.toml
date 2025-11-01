@@ -20,6 +20,14 @@ requests_per_minute = 60
 # Verify SSL certificates for API connections
 # Set to false if you encounter SSL certificate verification errors (not recommended)
 verify_ssl = true
+# When downloading user favorites tracks, download the entire album instead of just the track
+download_full_album_for_liked_tracks = false
+# Validate downloaded audio files for corruption
+validate_audio = false
+# Retry downloads when validation fails
+retry_on_validation_failure = true
+# Delete invalid audio files
+delete_invalid_files = false
 
 [qobuz]
 # 1: 320kbps MP3, 2: 16/44.1, 3: 24/<=96, 4: 24/>=96
@@ -46,6 +54,8 @@ quality = 3
 lower_quality_if_not_available = true
 # This will download videos included in Video Albums.
 download_videos = true
+# Fetch lyrics for tracks when available
+fetch_lyrics = false
 
 # Do not change any of the fields below
 user_id = ""
@@ -186,12 +196,22 @@ source = "qobuz"
 # on this one.
 fallback_source = ""
 
+[rym]
+# Enable RateYourMusic metadata enrichment
+enabled = false
+# How to handle RYM genres: "replace" existing or "append" to existing
+genre_mode = "append"
+# Raw config dict for RYM - any additional options will be passed directly to RYMConfig
+config = {}
+
 [cli]
 # Print "Downloading {Album name}" etc. to screen
 text_output = true
 # Show resolve, download progress bars
 progress_bars = true
 # The maximum number of search results to show in the interactive menu
+# Enable dry run mode by default (can be overridden with --dry-run flag)
+dry_run = false
 max_search_results = 100
 
 [misc]

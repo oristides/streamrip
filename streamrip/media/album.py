@@ -108,8 +108,10 @@ class PendingAlbum(Pending):
 
     def _album_folder(self, parent: str, meta: AlbumMetadata) -> str:
         config = self.config.session
-        if config.downloads.source_subdirectories:
-            parent = os.path.join(parent, self.client.source.capitalize())
+        # Always use source-specific folder structure (same as playlists)
+        # Get source name from client and capitalize it (e.g., "tidal" -> "Tidal")
+        source_name = self.client.source.capitalize()
+        parent = os.path.join(parent, source_name)
         # Route albums into a dedicated subfolder
         parent = os.path.join(parent, "albums")
         formatter = config.filepaths.folder_format

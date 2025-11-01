@@ -2127,8 +2127,13 @@ def database_backfill(ctx, scan_path, dry_run, limit):
 @click.option(
     "--dry-run", is_flag=True, help="Show what would be updated without making changes"
 )
+@click.option(
+    "--remove-errors",
+    is_flag=True,
+    help="Remove corrupted and empty files that cannot be processed",
+)
 @click.pass_context
-def database_sync(ctx, scan_path, dry_run):
+def database_sync(ctx, scan_path, dry_run, remove_errors):
     """Sync database with existing music files - adds missing entries."""
     with ctx.obj["config"] as cfg:
         if not cfg.session.database.downloads_enabled:
@@ -2186,6 +2191,7 @@ def database_sync(ctx, scan_path, dry_run):
         added_count = 0
         skipped_count = 0
         error_count = 0
+        removed_count = 0
 
         with sqlite3.connect(db_path) as conn:
             for i, file_path in enumerate(music_files, 1):
@@ -2194,59 +2200,251 @@ def database_sync(ctx, scan_path, dry_run):
                         f"[blue]Processing {i}/{len(music_files)}: {os.path.basename(file_path)}[/blue]"
                     )
 
-                    # Extract metadata
-                    audio_file = MutagenFile(file_path)
+                    # Check if file is empty or too small (likely corrupted)
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        if file_size == 0:
+                            console.print(
+                                "[red]  ❌ File is empty (0 bytes), skipping[/red]"
+                            )
+                            if remove_errors and not dry_run:
+                                try:
+                                    os.remove(file_path)
+                                    console.print(
+                                        "[yellow]  🗑️  Removed empty file[/yellow]"
+                                    )
+                                    removed_count += 1
+                                except Exception as e:
+                                    console.print(
+                                        f"[red]  ❌ Failed to remove file: {e}[/red]"
+                                    )
+                            elif remove_errors and dry_run:
+                                console.print(
+                                    "[blue]  🔍 Would remove empty file (dry-run)[/blue]"
+                                )
+                            error_count += 1
+                            continue
+                        if file_size < 1000:  # Less than 1KB is suspicious
+                            console.print(
+                                f"[yellow]  ⚠️  File is very small ({file_size} bytes), "
+                                "may be corrupted[/yellow]"
+                            )
+                    except Exception:
+                        pass
+
+                    # Extract metadata with format detection
+                    # Try format detection first if MutagenFile fails
+                    audio_file = None
+                    format_detection_attempted = False
+                    initial_error = None
+
+                    try:
+                        audio_file = MutagenFile(file_path)
+                        if audio_file is None:
+                            raise Exception("MutagenFile returned None")
+                        # Try to access a property to trigger any lazy-loading errors
+                        _ = audio_file.tags
+                    except Exception as e:
+                        initial_error = e
+                        format_detection_attempted = True
+                        # Always try format detection when MutagenFile fails
+                        # (could be wrong extension, corrupted file, etc.)
+                        console.print(
+                            "[yellow]  ⚠️  Format detection failed, "
+                            "trying to detect actual format...[/yellow]"
+                        )
+                        # Try different formats
+                        from mutagen.flac import FLAC
+                        from mutagen.mp3 import MP3
+                        from mutagen.mp4 import MP4
+
+                        formats_to_try = [
+                            ("FLAC", lambda: FLAC(file_path)),
+                            ("MP4/AAC", lambda: MP4(file_path)),
+                            ("MP3", lambda: MP3(file_path)),
+                        ]
+
+                        for format_name, format_loader in formats_to_try:
+                            try:
+                                test_file = format_loader()
+                                # Verify it's actually readable by accessing tags
+                                if test_file is not None:
+                                    _ = test_file.tags  # Trigger any errors
+                                    audio_file = test_file
+                                    console.print(
+                                        f"[green]  ✅ Detected format: "
+                                        f"{format_name}[/green]"
+                                    )
+                                    break
+                            except Exception:
+                                continue
+
+                        if audio_file is None:
+                            # All format detection attempts failed
+                            console.print(
+                                f"[red]  ❌ Could not determine file format "
+                                f"(tried FLAC, MP4/AAC, MP3): {initial_error}[/red]"
+                            )
+                            if remove_errors and not dry_run:
+                                try:
+                                    os.remove(file_path)
+                                    console.print(
+                                        "[yellow]  🗑️  Removed corrupted file[/yellow]"
+                                    )
+                                    removed_count += 1
+                                except Exception as e:
+                                    console.print(
+                                        f"[red]  ❌ Failed to remove file: {e}[/red]"
+                                    )
+                            elif remove_errors and dry_run:
+                                console.print(
+                                    "[blue]  🔍 Would remove corrupted file (dry-run)[/blue]"
+                                )
+                            error_count += 1
+                            continue
+
                     if audio_file is None:
                         console.print("[yellow]  ⚠️  Could not read metadata[/yellow]")
                         skipped_count += 1
                         continue
 
-                    # Extract metadata fields
-                    title = (
-                        audio_file.get("title", ["Unknown"])[0]
-                        if audio_file.get("title")
-                        else "Unknown"
-                    )
-                    artist = (
-                        audio_file.get("artist", ["Unknown"])[0]
-                        if audio_file.get("artist")
-                        else "Unknown"
-                    )
-                    album = (
-                        audio_file.get("album", [None])[0]
-                        if audio_file.get("album")
-                        else None
-                    )
-                    album_artist = (
-                        audio_file.get("albumartist", [None])[0]
-                        if audio_file.get("albumartist")
-                        else None
-                    )
-                    track_number = (
-                        audio_file.get("tracknumber", [None])[0]
-                        if audio_file.get("tracknumber")
-                        else None
-                    )
-                    disc_number = (
-                        audio_file.get("discnumber", [None])[0]
-                        if audio_file.get("discnumber")
-                        else None
-                    )
-                    year = (
-                        audio_file.get("date", [None])[0]
-                        if audio_file.get("date")
-                        else None
-                    )
-                    genre = (
-                        audio_file.get("genre", [None])[0]
-                        if audio_file.get("genre")
-                        else None
-                    )
-                    duration = (
-                        int(audio_file.info.length)
-                        if hasattr(audio_file, "info") and audio_file.info.length
-                        else None
-                    )
+                    # Extract metadata fields (wrap in try-catch for format detection)
+                    try:
+                        title = (
+                            audio_file.get("title", ["Unknown"])[0]
+                            if audio_file.get("title")
+                            else "Unknown"
+                        )
+                        artist = (
+                            audio_file.get("artist", ["Unknown"])[0]
+                            if audio_file.get("artist")
+                            else "Unknown"
+                        )
+                        album = (
+                            audio_file.get("album", [None])[0]
+                            if audio_file.get("album")
+                            else None
+                        )
+                        album_artist = (
+                            audio_file.get("albumartist", [None])[0]
+                            if audio_file.get("albumartist")
+                            else None
+                        )
+                        track_number = (
+                            audio_file.get("tracknumber", [None])[0]
+                            if audio_file.get("tracknumber")
+                            else None
+                        )
+                        disc_number = (
+                            audio_file.get("discnumber", [None])[0]
+                            if audio_file.get("discnumber")
+                            else None
+                        )
+                        year = (
+                            audio_file.get("date", [None])[0]
+                            if audio_file.get("date")
+                            else None
+                        )
+                        genre = (
+                            audio_file.get("genre", [None])[0]
+                            if audio_file.get("genre")
+                            else None
+                        )
+                        duration = (
+                            int(audio_file.info.length)
+                            if hasattr(audio_file, "info") and audio_file.info.length
+                            else None
+                        )
+                    except Exception as meta_error:
+                        # If metadata extraction fails, try format detection
+                        if not format_detection_attempted:
+                            console.print(
+                                "[yellow]  ⚠️  Metadata extraction failed, "
+                                "trying format detection...[/yellow]"
+                            )
+                            format_detection_attempted = True
+                            # Try format detection
+                            from mutagen.flac import FLAC
+                            from mutagen.mp3 import MP3
+                            from mutagen.mp4 import MP4
+
+                            formats_to_try = [
+                                ("FLAC", lambda: FLAC(file_path)),
+                                ("MP4/AAC", lambda: MP4(file_path)),
+                                ("MP3", lambda: MP3(file_path)),
+                            ]
+
+                            audio_file = None
+                            for format_name, format_loader in formats_to_try:
+                                try:
+                                    test_file = format_loader()
+                                    if test_file is not None:
+                                        _ = test_file.tags
+                                        audio_file = test_file
+                                        console.print(
+                                            f"[green]  ✅ Detected format: "
+                                            f"{format_name}[/green]"
+                                        )
+                                        # Retry metadata extraction
+                                        title = (
+                                            audio_file.get("title", ["Unknown"])[0]
+                                            if audio_file.get("title")
+                                            else "Unknown"
+                                        )
+                                        artist = (
+                                            audio_file.get("artist", ["Unknown"])[0]
+                                            if audio_file.get("artist")
+                                            else "Unknown"
+                                        )
+                                        album = (
+                                            audio_file.get("album", [None])[0]
+                                            if audio_file.get("album")
+                                            else None
+                                        )
+                                        album_artist = (
+                                            audio_file.get("albumartist", [None])[0]
+                                            if audio_file.get("albumartist")
+                                            else None
+                                        )
+                                        track_number = (
+                                            audio_file.get("tracknumber", [None])[0]
+                                            if audio_file.get("tracknumber")
+                                            else None
+                                        )
+                                        disc_number = (
+                                            audio_file.get("discnumber", [None])[0]
+                                            if audio_file.get("discnumber")
+                                            else None
+                                        )
+                                        year = (
+                                            audio_file.get("date", [None])[0]
+                                            if audio_file.get("date")
+                                            else None
+                                        )
+                                        genre = (
+                                            audio_file.get("genre", [None])[0]
+                                            if audio_file.get("genre")
+                                            else None
+                                        )
+                                        duration = (
+                                            int(audio_file.info.length)
+                                            if hasattr(audio_file, "info")
+                                            and audio_file.info.length
+                                            else None
+                                        )
+                                        break
+                                except Exception:
+                                    continue
+
+                            if audio_file is None:
+                                raise Exception(
+                                    f"Failed to extract metadata: {meta_error}"
+                                ) from meta_error
+                        else:
+                            # Already tried format detection, file is truly broken
+                            raise Exception(
+                                f"Failed to extract metadata: {meta_error}"
+                            ) from meta_error
 
                     # Determine quality based on file format and bitrate
                     quality = "Unknown"
@@ -2350,10 +2548,121 @@ def database_sync(ctx, scan_path, dry_run):
         console.print("\n[blue]📊 Sync Summary:[/blue]")
         console.print(f"[green]  ✅ Added: {added_count}[/green]")
         console.print(f"[yellow]  ⚠️  Skipped: {skipped_count}[/yellow]")
+        if remove_errors and removed_count > 0:
+            console.print(f"[yellow]  🗑️  Removed: {removed_count}[/yellow]")
         console.print(f"[red]  ❌ Errors: {error_count}[/red]")
 
         if dry_run:
             console.print("[blue]💡 Run without --dry-run to apply changes[/blue]")
+
+
+@database.command("remove-fragments")
+@click.option(
+    "--scan-path", help="Path to scan for music files (default: downloads folder)"
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be removed without deleting files"
+)
+@click.pass_context
+def database_remove_fragments(ctx, scan_path, dry_run):
+    """Remove MP4 fragment files that are not valid music files."""
+    with ctx.obj["config"] as cfg:
+        if not cfg.session.database.downloads_enabled:
+            console.print("[yellow]Database is disabled in configuration")
+            return
+
+        # Determine scan path
+        if scan_path:
+            music_path = scan_path
+        else:
+            music_path = cfg.session.downloads.folder
+
+        if not os.path.exists(music_path):
+            console.print(f"[yellow]Music path does not exist: {music_path}[/yellow]")
+            return
+
+        console.print(
+            f"[blue]🔍 Scanning for MP4 fragment files in: {music_path}[/blue]"
+        )
+
+        if dry_run:
+            console.print("[blue]🔍 Dry run - no files will be deleted[/blue]")
+
+        # Find music files
+        music_extensions = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".mp4"}
+        fragment_files = []
+
+        for root, dirs, files in os.walk(music_path):
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in music_extensions):
+                    file_path = os.path.join(root, file)
+
+                    # Check if it's an MP4 fragment
+                    try:
+                        with open(file_path, "rb") as f:
+                            header = f.read(12)
+                            # MP4 fragments start with "moof" box instead of "ftyp"
+                            if len(header) >= 8 and header[4:8] == b"moof":
+                                fragment_files.append(file_path)
+                                continue
+
+                            # Also check if it's missing ftyp but has moof
+                            if b"ftyp" not in header[:8]:
+                                f.seek(0)
+                                first_bytes = f.read(1024)
+                                if (
+                                    b"moof" in first_bytes[:100]
+                                    and b"ftyp" not in first_bytes[:100]
+                                ):
+                                    fragment_files.append(file_path)
+                    except Exception:
+                        # If we can't read it, try mutagen validation
+                        try:
+                            from mutagen.mp4 import MP4
+
+                            ext = os.path.splitext(file_path)[1].lower()
+                            if ext in [".m4a", ".mp4", ".aac"]:
+                                try:
+                                    MP4(file_path)
+                                except Exception:
+                                    # Try to see if it's a fragment
+                                    with open(file_path, "rb") as f:
+                                        first_bytes = f.read(100)
+                                        if (
+                                            b"moof" in first_bytes
+                                            and b"ftyp" not in first_bytes[:20]
+                                        ):
+                                            fragment_files.append(file_path)
+                        except Exception:
+                            continue
+
+        if not fragment_files:
+            console.print("[green]✅ No MP4 fragment files found[/green]")
+            return
+
+        console.print(
+            f"[yellow]Found {len(fragment_files)} MP4 fragment file(s):[/yellow]"
+        )
+
+        removed_count = 0
+        for file_path in fragment_files:
+            console.print(f"  [red]🗑️  {file_path}[/red]")
+            if not dry_run:
+                try:
+                    os.remove(file_path)
+                    removed_count += 1
+                except Exception as e:
+                    console.print(f"    [red]❌ Failed to remove: {e}[/red]")
+
+        if dry_run:
+            console.print(
+                f"\n[blue]💡 Would remove {len(fragment_files)} fragment file(s). "
+                "Run without --dry-run to delete them.[/blue]"
+            )
+        else:
+            console.print(
+                f"\n[green]✅ Removed {removed_count} fragment file(s)[/green]"
+            )
 
 
 @database.command("clean")
