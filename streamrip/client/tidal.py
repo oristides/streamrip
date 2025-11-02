@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from json import JSONDecodeError
-from xml.etree import ElementTree as ET  # noqa: N817
+from xml.etree import ElementTree
 
 import aiohttp
 
@@ -602,7 +602,7 @@ class TidalClient(Client):
         """
         try:
             manifest_xml = base64.b64decode(manifest_b64).decode("utf-8")
-            root = ET.fromstring(manifest_xml)
+            root = ElementTree.fromstring(manifest_xml)
 
             # Define XML namespace for DASH
             ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
@@ -654,7 +654,7 @@ class TidalClient(Client):
                 "mimeType": f"audio/{codecs}",
             }
 
-        except ET.ParseError as e:
+        except ElementTree.ParseError as e:
             raise Exception(f"Failed to parse DASH XML manifest: {e}")
 
     # ---------- Login Utilities ---------------
@@ -905,7 +905,7 @@ class TidalClient(Client):
             db: Database instance to check downloaded tracks
 
         Returns:
-            list: URLs of missing tracks
+            list: URLs of missing tracks (or albums if albums=True)
         """
         from rich.console import Console
 
@@ -937,28 +937,33 @@ class TidalClient(Client):
                             missing_urls.append(f"https://tidal.com/track/{track_id}")
 
         if albums:
-            console.print("[blue]💿 Getting missing tracks from albums...")
+            console.print("[blue]💿 Getting missing albums...")
             albums_data = await self.get_user_albums()
             for album in albums_data:
                 tracks = await self._get_album_tracks(album["id"])
                 missing = self._find_missing_tracks(tracks, db)
-                for track in missing:
-                    track_id = track.get("id")
-                    if track_id:
-                        missing_urls.append(f"https://tidal.com/track/{track_id}")
+                # Use album URL instead of individual track URLs
+                # This ensures tracks are organized in Tidal/albums/{album name} folders
+                if missing:
+                    album_id = album.get("id")
+                    if album_id:
+                        album_url = f"https://tidal.com/album/{album_id}"
+                        if album_url not in missing_urls:
+                            missing_urls.append(album_url)
 
             if recommended:
-                console.print(
-                    "[blue]🎯 Getting missing tracks from recommended albums..."
-                )
+                console.print("[blue]🎯 Getting missing recommended albums...")
                 rec_albums = await self.get_recommended_albums()
                 for album in rec_albums:
                     tracks = await self._get_album_tracks(album["id"])
                     missing = self._find_missing_tracks(tracks, db)
-                    for track in missing:
-                        track_id = track.get("id")
-                        if track_id:
-                            missing_urls.append(f"https://tidal.com/track/{track_id}")
+                    # Use album URL instead of individual track URLs
+                    if missing:
+                        album_id = album.get("id")
+                        if album_id:
+                            album_url = f"https://tidal.com/album/{album_id}"
+                            if album_url not in missing_urls:
+                                missing_urls.append(album_url)
 
         # Remove duplicates while preserving order
         seen = set()

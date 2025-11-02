@@ -2556,6 +2556,614 @@ def database_sync(ctx, scan_path, dry_run, remove_errors):
             console.print("[blue]💡 Run without --dry-run to apply changes[/blue]")
 
 
+@database.command("organize-albums")
+@click.option(
+    "--scan-path",
+    help="Path to scan for unorganized files (default: downloads folder root)",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be moved without making changes"
+)
+@click.option(
+    "--consolidate-duplicates",
+    is_flag=True,
+    help="Consolidate duplicate album folders with same name",
+)
+@click.option(
+    "--clean-folder-names",
+    is_flag=True,
+    help="Rename all folders to remove formats like [FLAC] [16B-44100kHz] and timestamps",
+)
+@click.pass_context
+def database_organize_albums(
+    ctx, scan_path, dry_run, consolidate_duplicates, clean_folder_names
+):
+    """Reorganize album tracks from root folder into Tidal/albums/{album name} structure.
+
+    Use --consolidate-duplicates to merge duplicate album folders (e.g., multiple variations
+    of 'Daft Punk - Random Access Memories') into a single folder with simplified name.
+    """
+    with ctx.obj["config"] as cfg:
+        if not cfg.session.database.downloads_enabled:
+            console.print("[yellow]Database is disabled in configuration")
+            return
+
+        # Determine scan path - default to downloads folder root
+        if scan_path:
+            source_path = scan_path
+        else:
+            source_path = cfg.session.downloads.folder
+
+        if not os.path.exists(source_path):
+            console.print(f"[red]Source path does not exist: {source_path}")
+            return
+
+        console.print(f"[blue]📁 Organizing album tracks from: {source_path}")
+
+        if dry_run:
+            console.print("[yellow]🔍 DRY RUN MODE - No files will be moved")
+
+        # Find music files directly in the root (not in subfolders)
+        music_extensions = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".mp4"}
+        music_files = []
+
+        for file in os.listdir(source_path):
+            if any(file.lower().endswith(ext) for ext in music_extensions):
+                file_path = os.path.join(source_path, file)
+                if os.path.isfile(file_path):
+                    music_files.append(file_path)
+
+        console.print(f"[blue]🎵 Found {len(music_files)} files to organize")
+
+        if not music_files:
+            console.print("[yellow]No music files found in root folder")
+            # Still consolidate duplicates or clean names if requested
+            if not consolidate_duplicates and not clean_folder_names:
+                return
+
+        # Import necessary modules
+        from mutagen import File as MutagenFile
+        from mutagen.flac import FLAC
+        from mutagen.mp3 import MP3
+        from mutagen.mp4 import MP4
+
+        from ..filepath_utils import clean_filepath
+
+        moved_count = 0
+        skipped_count = 0
+        error_count = 0
+        albums_organized = {}
+
+        for file_path in music_files:
+            try:
+                filename = os.path.basename(file_path)
+
+                # Try to read metadata
+                audio_file = None
+                try:
+                    ext = os.path.splitext(file_path)[1][1:].lower()
+                    if ext == "flac":
+                        audio_file = FLAC(file_path)
+                    elif ext in ["m4a", "mp4", "aac"]:
+                        audio_file = MP4(file_path)
+                    elif ext == "mp3":
+                        audio_file = MP3(file_path)
+                    else:
+                        audio_file = MutagenFile(file_path)
+                except Exception:
+                    # Try generic MutagenFile
+                    try:
+                        audio_file = MutagenFile(file_path)
+                    except Exception:
+                        pass
+
+                if audio_file is None:
+                    console.print(f"[red]  ❌ Could not read metadata: {filename}")
+                    error_count += 1
+                    continue
+
+                # Extract album metadata
+                album_name = None
+                album_artist = None
+                year = None
+
+                try:
+                    if ext == "flac":
+                        album_name = audio_file.get("album", [None])[0]
+                        album_artist = (
+                            audio_file.get("albumartist", [None])[0]
+                            or audio_file.get("artist", [None])[0]
+                        )
+                        year = audio_file.get("date", [None])[0]
+                    elif ext in ["m4a", "mp4", "aac"]:
+                        album_name = audio_file.get("\xa9alb", [None])[0]
+                        album_artist = (
+                            audio_file.get("aART", [None])[0]
+                            or audio_file.get("\xa9ART", [None])[0]
+                        )
+                        year = audio_file.get("\xa9day", [None])[0]
+                    elif ext == "mp3":
+                        album_name = (
+                            audio_file.get("TALB", [None])[0].text
+                            if audio_file.get("TALB")
+                            else None
+                        )
+                        album_artist = None
+                        if audio_file.get("TPE2"):
+                            album_artist = audio_file.get("TPE2")[0].text
+                        elif audio_file.get("TPE1"):
+                            album_artist = audio_file.get("TPE1")[0].text
+                        year = (
+                            audio_file.get("TDRC", [None])[0].text
+                            if audio_file.get("TDRC")
+                            else None
+                        )
+                except Exception as e:
+                    console.print(f"[yellow]  ⚠️  Error reading metadata: {e}")
+
+                # If no album name, skip (likely a single track or corrupted)
+                if not album_name:
+                    console.print(
+                        f"[yellow]  ⚠️  Skipping {filename} - no album metadata"
+                    )
+                    skipped_count += 1
+                    continue
+
+                # Build album folder path using same logic as _album_folder
+                parent = cfg.session.downloads.folder
+                source_name = (
+                    "Tidal"  # Assuming Tidal since user mentioned Tidal albums
+                )
+                parent = os.path.join(parent, source_name)
+                parent = os.path.join(parent, "albums")
+
+                # Normalize album artist to prevent duplicate folders
+                # Extract first/main artist to avoid splitting by featured artists
+                from ..filepath_utils import clean_filename
+
+                main_artist = None
+                if album_artist:
+                    # Take first artist if comma-separated (e.g., "Daft Punk, Pharrell Williams" -> "Daft Punk")
+                    main_artist = album_artist.split(",")[0].strip()
+                else:
+                    main_artist = "Unknown"
+
+                # Use simplified format without container/bit_depth/sampling_rate
+                folder_name = (
+                    f"{clean_filename(main_artist)} - {clean_filename(album_name)}"
+                )
+                if year and year != "Unknown":
+                    # Extract year if it's a datetime string (e.g., "2013-11-01T000000.000+0000" -> "2013")
+                    try:
+                        year_str = str(year)
+                        # Remove any timestamp format: 2013-11-01T000000.000+0000 -> 2013
+                        if "T" in year_str:
+                            year_only = year_str.split("T")[0].split("-")[0]
+                            if year_only.isdigit() and len(year_only) == 4:
+                                folder_name += f" ({year_only})"
+                        # Check if it's already a 4-digit year
+                        elif year_str.isdigit() and len(year_str) == 4:
+                            folder_name += f" ({year_str})"
+                        # Try to extract year from other formats
+                        elif len(year_str) >= 4:
+                            # Try to find a 4-digit year in the string
+                            year_match = re.search(r"\b(19|20)\d{2}\b", year_str)
+                            if year_match:
+                                folder_name += f" ({year_match.group()})"
+                    except Exception:
+                        pass
+
+                folder_name = clean_filepath(
+                    folder_name, cfg.session.filepaths.restrict_characters
+                )
+
+                album_folder = os.path.join(parent, folder_name)
+                target_file = os.path.join(album_folder, filename)
+
+                # Check if target already exists
+                if os.path.exists(target_file):
+                    console.print(
+                        f"[yellow]  ⚠️  Skipping {filename} - already exists in album folder"
+                    )
+                    skipped_count += 1
+                    continue
+
+                # Create album folder
+                if not dry_run:
+                    os.makedirs(album_folder, exist_ok=True)
+
+                # Move file
+                if dry_run:
+                    console.print(
+                        f"[blue]  📁 Would move to: Tidal/albums/{folder_name}/"
+                    )
+                else:
+                    shutil.move(file_path, target_file)
+                    console.print(f"[green]  ✅ Moved to: Tidal/albums/{folder_name}/")
+
+                moved_count += 1
+
+                # Track albums organized
+                if folder_name not in albums_organized:
+                    albums_organized[folder_name] = 0
+                albums_organized[folder_name] += 1
+
+            except Exception as e:
+                console.print(f"[red]  ❌ Error processing {filename}: {e}")
+                error_count += 1
+                continue
+
+        # Consolidate duplicate album folders if requested
+        if consolidate_duplicates:
+            console.print("\n[blue]🔗 Consolidating duplicate album folders...[/blue]")
+            consolidate_count = 0
+
+            albums_dir = os.path.join(cfg.session.downloads.folder, "Tidal", "albums")
+            if os.path.exists(albums_dir):
+                # Group folders by normalized album name (ignoring artist variations and formats)
+                album_groups = {}
+                for folder in os.listdir(albums_dir):
+                    folder_path = os.path.join(albums_dir, folder)
+                    if os.path.isdir(folder_path):
+                        # Extract album name (everything after " - ")
+                        if " - " in folder:
+                            album_part = folder.split(" - ", 1)[1]
+                            # Remove all brackets (formats like [M4A], [FLAC], [16B-44100kHz])
+                            album_clean = re.sub(r"\s*\[.*?\]\s*", "", album_part)
+                            # Remove year/quality info in parentheses, but extract year for later
+                            year_match = re.search(r"\((\d{4})", album_part)
+                            year_value = year_match.group(1) if year_match else None
+                            album_base = re.sub(
+                                r"\s*\(.*?\)\s*$", "", album_clean
+                            ).strip()
+                            # Normalize: lowercase, remove extra spaces
+                            album_clean = re.sub(
+                                r"\s+", " ", album_base.lower()
+                            ).strip()
+
+                            if album_clean and album_clean not in album_groups:
+                                album_groups[album_clean] = []
+                            if album_clean:
+                                album_groups[album_clean].append((folder, year_value))
+
+                # Consolidate groups with same album name
+                for album_clean, folder_data in album_groups.items():
+                    if len(folder_data) > 1:
+                        folders = [fd[0] for fd in folder_data]
+                        years = [fd[1] for fd in folder_data if fd[1]]
+
+                        # Determine target folder name: main artist - album name (year)
+                        # Extract main artist from folders - use first artist (before comma) from first folder
+                        first_folder = folders[0]
+                        first_artist_full = first_folder.split(" - ", 1)[0].strip()
+                        # Take only first artist if comma-separated (e.g., "Daft Punk, Julian Casablancas" -> "Daft Punk")
+                        main_artist = first_artist_full.split(",")[0].strip()
+
+                        # Extract album name from first folder (remove all formats)
+                        first_album_part = first_folder.split(" - ", 1)[1]
+                        # Remove all brackets (formats like [M4A], [FLAC], [16B-44100kHz])
+                        first_album_clean = re.sub(
+                            r"\s*\[.*?\]\s*", "", first_album_part
+                        )
+                        # Remove timestamps and dates: (2013-11-01T000000.000+0000) or (2013) or any parentheses content
+                        album_title = re.sub(
+                            r"\s*\(.*?\)\s*$", "", first_album_clean
+                        ).strip()
+                        # Also clean any remaining date patterns in the middle
+                        album_title = re.sub(
+                            r"\s*\([^)]*T[^)]*\)", "", album_title
+                        ).strip()
+
+                        # Use most common year, or first available
+                        year = years[0] if years else None
+
+                        # Build simplified folder name without formats
+                        target_name = f"{main_artist} - {album_title}"
+                        if year:
+                            target_name += f" ({year})"
+                        target_name = clean_filepath(
+                            target_name, cfg.session.filepaths.restrict_characters
+                        )
+
+                        target_folder = os.path.join(albums_dir, target_name)
+                        target_path = target_folder
+
+                        # Create target folder if it doesn't exist
+                        if not dry_run and not os.path.exists(target_path):
+                            os.makedirs(target_path, exist_ok=True)
+
+                        console.print(
+                            f"[blue]  📁 Consolidating {len(folders)} folders -> {target_name}[/blue]"
+                        )
+
+                        # Move files from all duplicate folders to target
+                        for source_folder in folders:
+                            # Skip if it's already the target
+                            if source_folder == target_name:
+                                continue
+
+                            source_path = os.path.join(albums_dir, source_folder)
+
+                            try:
+                                moved_in_folder = 0
+                                for file in os.listdir(source_path):
+                                    source_file = os.path.join(source_path, file)
+                                    target_file = os.path.join(target_path, file)
+
+                                    if os.path.isfile(source_file):
+                                        if not os.path.exists(target_file):
+                                            if dry_run:
+                                                console.print(
+                                                    f"[blue]    Would move: {file} from {source_folder}[/blue]"
+                                                )
+                                            else:
+                                                shutil.move(source_file, target_file)
+                                            consolidate_count += 1
+                                            moved_in_folder += 1
+                                        else:
+                                            # File already exists, skip duplicate
+                                            console.print(
+                                                f"[yellow]    ⚠️  Skipping duplicate file: {file}[/yellow]"
+                                            )
+
+                                # Remove empty duplicate folder
+                                if not dry_run and moved_in_folder > 0:
+                                    try:
+                                        # Check if folder is empty now
+                                        remaining = [
+                                            f
+                                            for f in os.listdir(source_path)
+                                            if os.path.isfile(
+                                                os.path.join(source_path, f)
+                                            )
+                                        ]
+                                        if not remaining:
+                                            os.rmdir(source_path)
+                                            console.print(
+                                                f"[green]    ✅ Removed duplicate folder: {source_folder}[/green]"
+                                            )
+                                        else:
+                                            console.print(
+                                                f"[yellow]    ⚠️  {source_folder} not empty ({len(remaining)} files left)[/yellow]"
+                                            )
+                                    except OSError:
+                                        pass  # Folder not empty, skip removal
+                            except Exception as e:
+                                console.print(
+                                    f"[yellow]    ⚠️  Error consolidating {source_folder}: {e}[/yellow]"
+                                )
+
+            if consolidate_count > 0:
+                console.print(
+                    f"[blue]  📦 Consolidated {consolidate_count} files from duplicate folders[/blue]"
+                )
+            elif not dry_run:
+                console.print(
+                    "[yellow]  i  No duplicate folders found to consolidate[/yellow]"
+                )
+
+        # Clean folder names (remove formats and timestamps) if requested
+        if clean_folder_names:
+            console.print(
+                "\n[blue]🧹 Cleaning folder names (removing formats and timestamps)...[/blue]"
+            )
+            renamed_count = 0
+
+            albums_dir = os.path.join(cfg.session.downloads.folder, "Tidal", "albums")
+            if os.path.exists(albums_dir):
+                for folder in os.listdir(albums_dir):
+                    folder_path = os.path.join(albums_dir, folder)
+                    if not os.path.isdir(folder_path):
+                        continue
+
+                    # Check if folder needs cleaning (has brackets or timestamp format)
+                    needs_cleaning = (
+                        "[" in folder
+                        or re.search(r"\(\d{4}-\d{2}-\d{2}T", folder) is not None
+                    )
+
+                    if needs_cleaning:
+                        # Extract artist and album
+                        if " - " in folder:
+                            artist_part = folder.split(" - ", 1)[0].strip()
+                            album_part = folder.split(" - ", 1)[1]
+
+                            # Get main artist (first before comma)
+                            main_artist = artist_part.split(",")[0].strip()
+
+                            # Remove all brackets (formats)
+                            album_clean = re.sub(r"\s*\[.*?\]\s*", "", album_part)
+
+                            # Remove timestamps and dates, but extract year
+                            year_match = re.search(r"\((\d{4})", album_clean)
+                            year = year_match.group(1) if year_match else None
+
+                            # Remove all parentheses content (dates, timestamps)
+                            album_title = re.sub(
+                                r"\s*\([^)]*\)\s*$", "", album_clean
+                            ).strip()
+                            # Also remove any timestamp patterns in the middle
+                            album_title = re.sub(
+                                r"\s*\([^)]*T[^)]*\)", "", album_title
+                            ).strip()
+                            album_title = album_title.strip()
+
+                            # Build new folder name
+                            new_folder_name = f"{main_artist} - {album_title}"
+                            if year:
+                                new_folder_name += f" ({year})"
+
+                            new_folder_name = clean_filepath(
+                                new_folder_name,
+                                cfg.session.filepaths.restrict_characters,
+                            )
+
+                            new_folder_path = os.path.join(albums_dir, new_folder_name)
+
+                            # Skip if already named correctly or if target exists
+                            if folder == new_folder_name:
+                                continue
+
+                            if (
+                                os.path.exists(new_folder_path)
+                                and folder != new_folder_name
+                            ):
+                                console.print(
+                                    f"[yellow]  ⚠️  Skipping {folder} - target {new_folder_name} already exists[/yellow]"
+                                )
+                                continue
+
+                            if dry_run:
+                                console.print(f"[blue]  Would rename: {folder}[/blue]")
+                                console.print(
+                                    f"[blue]            -> {new_folder_name}[/blue]"
+                                )
+                            else:
+                                try:
+                                    os.rename(folder_path, new_folder_path)
+                                    console.print(
+                                        f"[green]  ✅ Renamed: {folder}[/green]"
+                                    )
+                                    console.print(
+                                        f"[green]              -> {new_folder_name}[/green]"
+                                    )
+                                    renamed_count += 1
+                                except Exception as e:
+                                    console.print(
+                                        f"[red]  ❌ Error renaming {folder}: {e}[/red]"
+                                    )
+
+            if renamed_count > 0:
+                console.print(f"[blue]  📦 Renamed {renamed_count} folders[/blue]")
+            elif not dry_run:
+                console.print("[yellow]  i  No folders needed cleaning[/yellow]")
+
+        # After moving files, consolidate duplicate album folders
+        if not dry_run and moved_count > 0 and not consolidate_duplicates:
+            console.print("\n[blue]🔗 Consolidating duplicate album folders...[/blue]")
+            consolidate_count = 0
+
+            albums_dir = os.path.join(cfg.session.downloads.folder, "Tidal", "albums")
+            if os.path.exists(albums_dir):
+                # Group folders by normalized album name (ignoring artist variations and formats)
+                album_groups = {}
+                for folder in os.listdir(albums_dir):
+                    folder_path = os.path.join(albums_dir, folder)
+                    if os.path.isdir(folder_path):
+                        # Extract album name (everything after " - ")
+                        if " - " in folder:
+                            album_part = folder.split(" - ", 1)[1]
+                            # Remove all brackets (formats like [M4A], [FLAC], [16B-44100kHz])
+                            album_clean = re.sub(r"\s*\[.*?\]\s*", "", album_part)
+                            # Remove year/quality info in parentheses
+                            album_clean = re.sub(
+                                r"\s*\(.*?\)\s*$", "", album_clean
+                            ).strip()
+                            # Normalize: lowercase, remove extra spaces
+                            album_clean = re.sub(
+                                r"\s+", " ", album_clean.lower()
+                            ).strip()
+
+                            if album_clean and album_clean not in album_groups:
+                                album_groups[album_clean] = []
+                            if album_clean:
+                                album_groups[album_clean].append(folder)
+
+                # Consolidate groups with same album name
+                for album_clean, folders in album_groups.items():
+                    if len(folders) > 1:
+                        # Prefer folder with simplest name (without formats) or alphabetically first
+                        def normalize_folder_name(f):
+                            # Remove brackets and normalize
+                            normalized = re.sub(r"\s*\[.*?\]\s*", "", f)
+                            normalized = re.sub(r"\s*\(.*?\)\s*$", "", normalized)
+                            return normalized.lower().strip()
+
+                        # Sort by normalized name, then by length (prefer simpler names)
+                        sorted_folders = sorted(
+                            folders, key=lambda f: (normalize_folder_name(f), len(f))
+                        )
+                        target_folder = sorted_folders[0]
+                        target_path = os.path.join(albums_dir, target_folder)
+
+                        for source_folder in sorted_folders[1:]:
+                            source_path = os.path.join(albums_dir, source_folder)
+
+                            # Move files from duplicate folder to target
+                            try:
+                                moved_in_folder = 0
+                                for file in os.listdir(source_path):
+                                    source_file = os.path.join(source_path, file)
+                                    target_file = os.path.join(target_path, file)
+
+                                    if os.path.isfile(source_file):
+                                        if not os.path.exists(target_file):
+                                            shutil.move(source_file, target_file)
+                                            consolidate_count += 1
+                                            moved_in_folder += 1
+                                        else:
+                                            # File already exists, skip duplicate
+                                            console.print(
+                                                f"[yellow]  ⚠️  Skipping duplicate file: {file}[/yellow]"
+                                            )
+
+                                # Remove empty duplicate folder
+                                try:
+                                    if moved_in_folder > 0:
+                                        # Check if folder is empty now
+                                        remaining = [
+                                            f
+                                            for f in os.listdir(source_path)
+                                            if os.path.isfile(
+                                                os.path.join(source_path, f)
+                                            )
+                                        ]
+                                        if not remaining:
+                                            os.rmdir(source_path)
+                                            console.print(
+                                                f"[green]  ✅ Consolidated: {source_folder} -> {target_folder}[/green]"
+                                            )
+                                        else:
+                                            console.print(
+                                                f"[yellow]  ⚠️  {source_folder} not empty ({len(remaining)} files left)[/yellow]"
+                                            )
+                                except OSError:
+                                    pass  # Folder not empty, skip removal
+                            except Exception as e:
+                                console.print(
+                                    f"[yellow]  ⚠️  Error consolidating {source_folder}: {e}[/yellow]"
+                                )
+
+            if consolidate_count > 0:
+                console.print(
+                    f"[blue]  📦 Consolidated {consolidate_count} files from duplicate folders[/blue]"
+                )
+
+        # Summary
+        console.print("\n[blue]📊 Organization Summary:[/blue]")
+        console.print(f"[green]  ✅ Moved: {moved_count} files[/green]")
+        console.print(f"[yellow]  ⚠️  Skipped: {skipped_count} files[/yellow]")
+        console.print(f"[red]  ❌ Errors: {error_count} files[/red]")
+
+        if albums_organized:
+            console.print(
+                f"\n[blue]📁 Albums organized: {len(albums_organized)}[/blue]"
+            )
+            for album_name, count in sorted(albums_organized.items()):
+                console.print(f"  • {album_name}: {count} tracks")
+
+        if dry_run:
+            console.print(
+                "\n[yellow]🔍 This was a dry run. "
+                "Run without --dry-run to actually move files.[/yellow]"
+            )
+        else:
+            console.print(
+                "\n[green]✅ Files organized! "
+                "Run 'rip database sync' to update database paths.[/green]"
+            )
+
+
 @database.command("remove-fragments")
 @click.option(
     "--scan-path", help="Path to scan for music files (default: downloads folder)"
