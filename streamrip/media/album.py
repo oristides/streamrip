@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 from .. import progress
@@ -114,9 +115,37 @@ class PendingAlbum(Pending):
         parent = os.path.join(parent, source_name)
         # Route albums into a dedicated subfolder
         parent = os.path.join(parent, "albums")
-        formatter = config.filepaths.folder_format
-        folder = clean_filepath(
-            meta.format_folder_path(formatter), config.filepaths.restrict_characters
+
+        # Use simplified format: {albumartist} - {title} ({year})
+        # This matches the clean naming convention from organize-albums command
+        from ..filepath_utils import clean_filename
+
+        # Extract main artist (first before comma)
+        main_artist = (
+            meta.albumartist.split(",")[0].strip() if meta.albumartist else "Unknown"
         )
+        album_title = clean_filename(meta.album)
+
+        # Build simplified folder name
+        folder_name = f"{clean_filename(main_artist)} - {album_title}"
+
+        # Add year if available (extract just the year from datetime strings)
+        if meta.year and meta.year != "Unknown":
+            year_str = str(meta.year)
+            # Extract year from datetime strings like "2013-11-01T000000.000+0000" -> "2013"
+            if "T" in year_str:
+                year_only = year_str.split("T")[0].split("-")[0]
+                if year_only.isdigit() and len(year_only) == 4:
+                    folder_name += f" ({year_only})"
+            # Check if it's already a 4-digit year
+            elif year_str.isdigit() and len(year_str) == 4:
+                folder_name += f" ({year_str})"
+            # Try to find a 4-digit year in the string
+            elif len(year_str) >= 4:
+                year_match = re.search(r"\b(19|20)\d{2}\b", year_str)
+                if year_match:
+                    folder_name += f" ({year_match.group()})"
+
+        folder = clean_filepath(folder_name, config.filepaths.restrict_characters)
 
         return os.path.join(parent, folder)

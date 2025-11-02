@@ -800,11 +800,52 @@ class TidalClient(Client):
         async with self.rate_limiter:
             async with self.session.get(f"{base}/{path}", params=params) as resp:
                 if resp.status == 404:
-                    # Don't log warning for lyrics endpoint - 404 is normal when no lyrics exist
-                    # Only log for actual track/album/etc endpoints
-                    if "/lyrics" not in path:
-                        logger.warning(f"TIDAL: track not found (status {resp.status})")
-                    raise NonStreamableError("TIDAL: Track not found")
+                    # Lyrics endpoint - 404 is normal when no lyrics exist
+                    # Don't log warning for lyrics - it's handled silently in get_metadata
+                    if "/lyrics" in path:
+                        # Extract track ID from path for context
+                        track_id = path.split("/")[1] if "/" in path else "unknown"
+                        logger.debug(
+                            f"TIDAL: Lyrics not available for track {track_id} "
+                            f"(status {resp.status})"
+                        )
+                        raise NonStreamableError("TIDAL: Lyrics not available")
+
+                    # Determine what type of resource was requested for better error
+                    # Extract resource ID from path for context
+                    resource_id = path.split("/")[-1] if "/" in path else "unknown"
+
+                    if "/tracks/" in path or path.startswith("tracks/"):
+                        logger.warning(
+                            f"TIDAL: Track {resource_id} not found "
+                            f"(status {resp.status})"
+                        )
+                        raise NonStreamableError(
+                            f"TIDAL: Track {resource_id} not found"
+                        )
+                    elif "/albums/" in path or path.startswith("albums/"):
+                        logger.warning(
+                            f"TIDAL: Album {resource_id} not found "
+                            f"(status {resp.status})"
+                        )
+                        raise NonStreamableError(
+                            f"TIDAL: Album {resource_id} not found"
+                        )
+                    elif "/playlists/" in path or path.startswith("playlists/"):
+                        logger.warning(
+                            f"TIDAL: Playlist {resource_id} not found "
+                            f"(status {resp.status})"
+                        )
+                        raise NonStreamableError(
+                            f"TIDAL: Playlist {resource_id} not found"
+                        )
+                    else:
+                        # Other endpoints (user data, etc.) - log at debug level
+                        logger.debug(
+                            f"TIDAL: Resource not found "
+                            f"(status {resp.status}) - {path}"
+                        )
+                        raise NonStreamableError("TIDAL: Resource not found")
                 resp.raise_for_status()
                 return await resp.json()
 

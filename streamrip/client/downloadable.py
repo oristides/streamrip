@@ -303,8 +303,10 @@ class TidalDownloadable(Downloadable):
 
                     async with self.session.get(segment_url) as resp:
                         resp.raise_for_status()
+                        # Use larger chunk size (64KB) for better I/O performance
+                        chunk_size = 65536  # 64KB chunks
                         with open(segment_file, "wb") as f:
-                            async for chunk in resp.content.iter_chunked(8192):
+                            async for chunk in resp.content.iter_chunked(chunk_size):
                                 f.write(chunk)
                                 callback(len(chunk))
 
@@ -319,9 +321,10 @@ class TidalDownloadable(Downloadable):
                     download_segment(idx, url) for idx, url in enumerate(self.url)
                 ]
 
-                # Use semaphore to limit concurrent downloads (max 10 parallel)
+                # Use semaphore to limit concurrent downloads (max 20 parallel)
+                # Increased from 10 to 20 for better performance on fast connections
                 # Prevents overwhelming server while maintaining good speed
-                semaphore = asyncio.Semaphore(10)
+                semaphore = asyncio.Semaphore(20)
 
                 async def bounded_download(task):
                     """Wrap task with semaphore for controlled concurrency."""
@@ -403,12 +406,14 @@ class TidalDownloadable(Downloadable):
                         "concat demuxer failed, trying ISOBMFF fragment processing..."
                     )
 
-                    # Concatenate segments raw first
+                    # Concatenate segments raw - optimized with larger buffer
                     temp_raw = os.path.join(temp_dir, "raw_concatenated.m4a")
+                    # Use larger buffer (1MB) for faster concatenation
+                    buffer_size = 1024 * 1024  # 1MB buffer
                     with open(temp_raw, "wb") as outfile:
                         for seg_file in segment_files:
                             with open(seg_file, "rb") as infile:
-                                shutil.copyfileobj(infile, outfile)
+                                shutil.copyfileobj(infile, outfile, length=buffer_size)
 
                     # Process ISOBMFF fragments by extracting audio and re-encapsulating
                     # Fragmentos ISOBMFF não têm 'moov' box, então precisamos extrair o áudio
@@ -476,10 +481,14 @@ class TidalDownloadable(Downloadable):
                     # Ensure we have the concatenated file
                     temp_raw = os.path.join(temp_dir, "raw_concatenated.m4a")
                     if not os.path.exists(temp_raw):
+                        # Use larger buffer (1MB) for faster concatenation
+                        buffer_size = 1024 * 1024  # 1MB buffer
                         with open(temp_raw, "wb") as outfile:
                             for seg_file in segment_files:
                                 with open(seg_file, "rb") as infile:
-                                    shutil.copyfileobj(infile, outfile)
+                                    shutil.copyfileobj(
+                                        infile, outfile, length=buffer_size
+                                    )
 
                     # Try to extract audio by treating concatenated file as raw PCM
                     # This bypasses MP4 structure requirements
