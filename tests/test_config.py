@@ -19,6 +19,7 @@ from streamrip.config import (
     MiscConfig,
     QobuzConfig,
     QobuzDiscographyFilterConfig,
+    RymConfig,
     SoundcloudConfig,
     TidalConfig,
     YoutubeConfig,
@@ -164,6 +165,10 @@ def test_sample_config_data_fields(sample_config_data):
             max_connections=6,
             requests_per_minute=60,
             verify_ssl=True,
+            download_full_album_for_liked_tracks=False,
+            validate_audio=False,
+            retry_on_validation_failure=True,
+            delete_invalid_files=False,
         ),
         qobuz=QobuzConfig(
             use_auth_token=False,
@@ -182,6 +187,8 @@ def test_sample_config_data_fields(sample_config_data):
             token_expiry="tokenexpiry",
             quality=3,
             download_videos=True,
+            fetch_lyrics=True,
+            lower_quality_if_not_available=True,
         ),
         deezer=DeezerConfig(
             arl="testarl",
@@ -228,10 +235,16 @@ def test_sample_config_data_fields(sample_config_data):
             non_studio_albums=False,
             non_remaster=False,
         ),
+        rym=RymConfig(
+            enabled=False,
+            genre_mode="append",
+            config={},
+        ),
         cli=CliConfig(
             text_output=False,
             progress_bars=False,
             max_search_results=100,
+            dry_run=False,
         ),
         database=DatabaseConfig(
             downloads_enabled=True,

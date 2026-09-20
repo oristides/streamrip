@@ -210,7 +210,8 @@ class DeezerClient(Client):
 
         dl_info["url"] = url
         logger.debug("dz track info: %s", track_info)
-        return DeezerDownloadable(self.session, dl_info)
+        extension = "flac" if quality >= 2 else "mp3"
+        return DeezerDownloadable(self.session, url, quality, extension)
 
     def _get_encrypted_file_url(
         self,
