@@ -23,6 +23,7 @@ def _require_ffmpeg():
 def _make_sine(path: Path, duration: float = 2.0) -> Path:
     import subprocess
 
+    _require_ffmpeg()
     subprocess.run(
         [
             "ffmpeg",
@@ -44,6 +45,7 @@ def _make_sine(path: Path, duration: float = 2.0) -> Path:
 def _make_white_noise(path: Path, duration: float = 2.0) -> Path:
     import subprocess
 
+    _require_ffmpeg()
     subprocess.run(
         [
             "ffmpeg",

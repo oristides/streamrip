@@ -32,5 +32,11 @@ jobs:
     - name: Install dependencies
       run: poetry install --with dev
 
+    - name: Install ffmpeg
+      # The repair tests build synthetic noise / sine fixtures with ffmpeg
+      # and verify reconstructed DASH audio. Without this those tests
+      # skip, but several repair regressions would also go undetected.
+      run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
     - name: Run unit tests
       run: poetry run pytest tests/ -v
