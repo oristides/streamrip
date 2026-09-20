@@ -17,7 +17,10 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        # Bumped from 3.10 to 3.12 to match local development. Several
+        # dependencies in poetry.lock now require >=3.10 and tests on 3.10
+        # fail with import errors that don't reproduce locally.
+        python-version: '3.12'
 
     - name: Install Poetry
       uses: snok/install-poetry@v1
