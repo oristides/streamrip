@@ -3681,7 +3681,7 @@ def database_organize_files(ctx, source_path, target_path, dry_run):
 
                         if matches:
                             # Found matching database entry
-                            track_id, playlist_id, title, artist = matches[0]
+                            _track_id, playlist_id, _title, _artist = matches[0]
 
                             # Try to find playlist name from playlist_id
                             if playlist_id:
