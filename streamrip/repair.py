@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -34,6 +35,17 @@ class AudioStats:
 
     path: Path
     zcr: float | None = None  # zero-crossing rate (0.0 - ~0.5)
+
+
+@dataclass(slots=True)
+class DbEntry:
+    """A row from downloads_enhanced that matches a corrupted file."""
+
+    id: str
+    source: str
+    title: str
+    artist: str
+    file_path: str
 
 
 def classify_zcr(zcr: float | None) -> str:
@@ -183,3 +195,54 @@ def repair_directory(
         "removed": removed,
         "dry_run": dry_run,
     }
+
+
+def find_db_entries_for_paths(
+    db_path: Path | str,
+    file_paths: list[Path] | list[str],
+    *,
+    table: str = "downloads_enhanced",
+) -> list[DbEntry]:
+    """Look up DB rows whose ``file_path`` matches one of ``file_paths``.
+
+    Returns an empty list if the DB file or table does not exist. Only the
+    columns needed for display are fetched.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists() or not file_paths:
+        return []
+
+    paths = [str(p) for p in file_paths]
+    placeholders = ",".join("?" * len(paths))
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master " "WHERE type='table' AND name=?",
+                (table,),
+            )
+            if cur.fetchone() is None:
+                logger.debug("Table %s not present in %s", table, db_path)
+                return []
+
+            cur = conn.execute(
+                f"SELECT id, source, title, artist, file_path "
+                f"FROM {table} WHERE file_path IN ({placeholders})",
+                paths,
+            )
+            return [
+                DbEntry(
+                    id=row[0],
+                    source=row[1] or "",
+                    title=row[2] or "",
+                    artist=row[3] or "",
+                    file_path=row[4] or "",
+                )
+                for row in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as e:
+        logger.warning("Could not read DB %s: %s", db_path, e)
+        return []

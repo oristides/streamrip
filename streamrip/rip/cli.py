@@ -240,8 +240,15 @@ def rip(
     help="Number of parallel ffmpeg analysis workers (default: 4).",
     type=click.IntRange(min=1, max=32),
 )
+@click.option(
+    "--db-path",
+    default=None,
+    help="Cross-reference findings with the streamrip downloads DB at this "
+    "path. Defaults to ~/.config/streamrip/downloads.db if it exists.",
+    type=click.Path(dir_okay=False),
+)
 @click.pass_context
-def repair(ctx, path, delete, workers):
+def repair(ctx, path, delete, workers, db_path):
     """Find and (optionally) remove white-noise audio files under PATH.
 
     These are files left behind by an older streamrip bug where compressed
@@ -250,11 +257,14 @@ def repair(ctx, path, delete, workers):
     is to delete them and re-download.
 
     By default the command performs a dry run and only lists the files that
-    would be deleted. Pass --delete to actually remove them.
+    would be deleted. Pass --delete to actually remove them. The command
+    also cross-references findings with the streamrip downloads database so
+    you know which track IDs to expect when re-downloading.
     """
     from rich.table import Table
 
     from ..repair import (
+        find_db_entries_for_paths,
         remove_white_noise_files,
         scan_for_white_noise,
     )
@@ -279,6 +289,31 @@ def repair(ctx, path, delete, workers):
         zcr = "n/a" if stats.zcr is None else f"{stats.zcr:.4f}"
         table.add_row(zcr, str(stats.path))
     console.print(table)
+
+    if db_path is None:
+        db_path = str(Path.home() / ".config" / "streamrip" / "downloads.db")
+    db_entries = find_db_entries_for_paths(db_path, [str(s.path) for s in noise])
+    if db_entries:
+        db_table = Table(
+            title=f"DB matches in {db_path}",
+            show_lines=False,
+        )
+        db_table.add_column("ID")
+        db_table.add_column("Title", overflow="fold")
+        db_table.add_column("Artist", overflow="fold")
+        db_table.add_column("File", overflow="fold")
+        for e in db_entries:
+            db_table.add_row(e.id, e.title, e.artist, e.file_path)
+        console.print(db_table)
+        console.print(
+            f"[yellow]Tip:[/yellow] these {len(db_entries)} tracks are "
+            "marked as downloaded in the DB. After deleting the files, you "
+            "can either re-download with [bold]rip --no-db ...[/bold] or "
+            "remove the matching rows from "
+            "[italic]downloads_enhanced[/italic]."
+        )
+    elif Path(db_path).exists():
+        console.print(f"[dim]No DB matches for the corrupted files in {db_path}.[/dim]")
 
     if not delete:
         console.print(

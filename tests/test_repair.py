@@ -242,3 +242,63 @@ def test_repair_cli_rejects_nonexistent_path(tmp_path):
         catch_exceptions=False,
     )
     assert result.exit_code != 0
+
+
+def test_find_db_entries_returns_matches(tmp_path):
+    """For each white-noise path, look up matching DB rows by file_path."""
+    import sqlite3
+
+    from streamrip.repair import find_db_entries_for_paths
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads_enhanced (id TEXT, source TEXT, title TEXT, "
+        "artist TEXT, file_path TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO downloads_enhanced VALUES (?, ?, ?, ?, ?)",
+        [
+            ("123", "tidal", "Good Song", "Artist A", "/music/good.flac"),
+            ("456", "tidal", "Bad Song", "Artist B", "/music/bad.m4a"),
+            ("789", "tidal", "Other", "Artist C", "/music/other.flac"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    noise_paths = [
+        tmp_path / "bad.m4a",  # won't exist on disk; db lookup uses the literal path
+    ]
+    # The function looks up by absolute path string. Use real-ish absolute paths:
+    noise_paths = ["/music/bad.m4a", "/music/missing.flac"]
+
+    matches = find_db_entries_for_paths(db_path, noise_paths)
+
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry.id == "456"
+    assert entry.title == "Bad Song"
+    assert entry.file_path == "/music/bad.m4a"
+
+
+def test_find_db_entries_handles_missing_db(tmp_path):
+    from streamrip.repair import find_db_entries_for_paths
+
+    result = find_db_entries_for_paths(tmp_path / "no.db", ["/x"])
+    assert result == []
+
+
+def test_find_db_entries_handles_missing_table(tmp_path):
+    import sqlite3
+
+    from streamrip.repair import find_db_entries_for_paths
+
+    db_path = tmp_path / "empty.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE other (id TEXT)")
+    conn.commit()
+    conn.close()
+
+    result = find_db_entries_for_paths(db_path, ["/x"])
+    assert result == []
