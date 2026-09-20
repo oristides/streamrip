@@ -222,6 +222,78 @@ def rip(
 
 
 @rip.command()
+@click.argument(
+    "path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+)
+@click.option(
+    "--delete",
+    "delete",
+    is_flag=True,
+    default=False,
+    help="Actually delete white-noise files. Without this flag the command "
+    "only reports what would be removed (dry run).",
+)
+@click.option(
+    "--workers",
+    default=4,
+    help="Number of parallel ffmpeg analysis workers (default: 4).",
+    type=click.IntRange(min=1, max=32),
+)
+@click.pass_context
+def repair(ctx, path, delete, workers):
+    """Find and (optionally) remove white-noise audio files under PATH.
+
+    These are files left behind by an older streamrip bug where compressed
+    DASH fragments were decoded as raw PCM, producing static noise. The
+    original audio cannot be recovered from these files, so the only remedy
+    is to delete them and re-download.
+
+    By default the command performs a dry run and only lists the files that
+    would be deleted. Pass --delete to actually remove them.
+    """
+    from rich.table import Table
+
+    from ..repair import (
+        remove_white_noise_files,
+        scan_for_white_noise,
+    )
+
+    path = Path(path)
+    if not shutil.which("ffmpeg"):
+        console.print("[red]ffmpeg is required to scan audio files.[/red]")
+        ctx.exit(1)
+        return
+
+    console.print(f"[blue]Scanning {path} for white-noise files...[/blue]")
+    noise = scan_for_white_noise(path, max_workers=workers)
+
+    if not noise:
+        console.print("[green]No white-noise files found.[/green]")
+        return
+
+    table = Table(title=f"White-noise files in {path}", show_lines=False)
+    table.add_column("ZCR", justify="right")
+    table.add_column("Path", overflow="fold")
+    for stats in noise:
+        zcr = "n/a" if stats.zcr is None else f"{stats.zcr:.4f}"
+        table.add_row(zcr, str(stats.path))
+    console.print(table)
+
+    if not delete:
+        console.print(
+            "[yellow]Dry run.[/yellow] Pass [bold]--delete[/bold] to actually "
+            "remove these files."
+        )
+        return
+
+    removed = remove_white_noise_files(noise, dry_run=False)
+    console.print(f"[green]Removed {len(removed)} white-noise file(s).[/green]")
+    for r in removed:
+        console.print(f"  - {r}")
+
+
+@rip.command()
 @click.argument("urls", nargs=-1, required=True)
 @click.option(
     "--batch-size",

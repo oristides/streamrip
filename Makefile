@@ -1,7 +1,7 @@
 # Streamrip Makefile
 # Provides convenient commands for development, testing, and maintenance
 
-.PHONY: help install install-dev test test-db test-unit test-integration test-coverage lint format clean docs build install-deps check-deps
+.PHONY: help install install-dev test test-db test-unit test-integration test-coverage lint format clean docs build install-deps check-deps repair-scan repair-delete repair-test
 
 # Default target
 help: ## Show this help message
@@ -239,3 +239,15 @@ compare-playlists: ## Compare TIDAL playlists vs local (missing only)
 
 download-playlists: ## Download missing tracks from TIDAL playlists
 	poetry run rip tidal download-missing --playlists
+
+# Repair (white-noise detection / removal)
+repair-scan: ## Dry-run: list white-noise files under PATH (use PATH=/some/dir)
+	@if [ -z "$(PATH)" ]; then echo "Usage: make repair-scan PATH=/path/to/music"; exit 1; fi
+	poetry run rip repair "$(PATH)"
+
+repair-delete: ## Delete white-noise files under PATH (use PATH=/some/dir)
+	@if [ -z "$(PATH)" ]; then echo "Usage: make repair-delete PATH=/path/to/music"; exit 1; fi
+	poetry run rip repair "$(PATH)" --delete
+
+repair-test: ## Run repair module tests
+	poetry run pytest tests/test_repair.py -v
