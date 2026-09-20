@@ -251,3 +251,69 @@ def test_tidal_downloadable_reconstructs_real_dash_segments(tmp_path):
     assert _zero_crossing_rate(saved) < 0.15
     # Keep fixture directory referenced so pytest doesn't warn on unused vars.
     assert dash_dir.exists()
+
+
+def test_reconstruct_dash_audio_raises_for_white_noise_output(tmp_path):
+    """If the reconstructed file is white noise, raise rather than return it.
+
+    This protects users from the original DASH-PCM bug returning as soon as
+    the new reconstructor is in place: any future regression that produces
+    PCM garbage would land in the user's library otherwise.
+    """
+    import shutil
+
+    from streamrip.client.downloadable import reconstruct_dash_audio
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg required")
+
+    # Generate white-noise .wav segments and pretend they are DASH fragments.
+    segment_dir = tmp_path / "segs"
+    segment_dir.mkdir()
+    seg_files = []
+    for i in range(3):
+        seg = segment_dir / f"seg_{i}.m4s"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anoisesrc=color=white:amplitude=0.3:duration=1:sample_rate=44100",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-f",
+                "mp4",
+                str(seg),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        seg_files.append(seg)
+
+    output = tmp_path / "out.m4a"
+    with pytest.raises(ValueError, match="white noise"):
+        reconstruct_dash_audio([str(p) for p in seg_files], output)
+
+    # Output must NOT have been left behind on disk
+    assert not output.exists()
+
+
+def test_reconstruct_dash_audio_accepts_real_music(tmp_path):
+    """A valid DASH reconstruction should not be flagged as white noise."""
+    import shutil
+
+    from streamrip.client.downloadable import reconstruct_dash_audio
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg required")
+
+    segment_files, _ = _make_sine_dash(tmp_path)
+    output = tmp_path / "ok.m4a"
+    # Should not raise
+    reconstruct_dash_audio([str(p) for p in segment_files], output)
+    assert output.exists()
+    assert _zero_crossing_rate(output) < 0.15

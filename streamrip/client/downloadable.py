@@ -93,6 +93,25 @@ def reconstruct_dash_audio(
                 and output_path.exists()
                 and output_path.stat().st_size > 0
             ):
+                # Validate the reconstructed file before returning it. A
+                # near-pure white-noise ZCR (>= 0.4) means the segments
+                # decoded as raw PCM despite our best efforts. Delete the
+                # bad file and raise so it never lands in the user's library.
+                from ..repair import _NOISE_ZCR_THRESHOLD, _extract_zcr
+
+                zcr = _extract_zcr(output_path)
+                if zcr is not None and zcr >= _NOISE_ZCR_THRESHOLD:
+                    try:
+                        output_path.unlink()
+                    except OSError:
+                        pass
+                    raise ValueError(
+                        f"Reconstructed DASH audio looks like white noise "
+                        f"(zero-crossing rate {zcr:.4f}). Refusing to save "
+                        "the file; the source segments may be corrupted or "
+                        "the codec is unsupported. ffmpeg error: "
+                        f"{last_error}"
+                    )
                 logger.info("Reconstructed DASH audio into %s", output_path.name)
                 return output_path
             last_error = result.stderr or last_error
