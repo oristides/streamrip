@@ -247,9 +247,9 @@ class RymConfig:
             if "cache_dir" not in rym_config_kwargs:
                 rym_config_kwargs["cache_dir"] = f"{app_dir}/rym_cache"
             if "session_state_file_path" not in rym_config_kwargs:
-                rym_config_kwargs["session_state_file_path"] = (
-                    f"{app_dir}/rym_session_state.json"
-                )
+                rym_config_kwargs[
+                    "session_state_file_path"
+                ] = f"{app_dir}/rym_session_state.json"
 
             return RYMConfig(**rym_config_kwargs)
         except ImportError:

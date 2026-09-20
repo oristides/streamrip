@@ -5,9 +5,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: chartboost/ruff-action@v1
+      - uses: astral-sh/ruff-action@v1
         with:
+          # Pinned to match .pre-commit-config.yaml (v0.1.6) and the local
+          # development environment so the CI catches the same issues
+          # developers see locally. Without this pin, the action pulls
+          # whatever latest version is published, which has caught us
+          # with new RUF rules between releases.
+          version: v0.1.6
           args: 'check'
-      - uses: chartboost/ruff-action@v1
+      - uses: astral-sh/ruff-action@v1
         with:
+          version: v0.1.6
           args: 'format --check'
