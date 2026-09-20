@@ -39,6 +39,89 @@ QUALITY_MAP = {
     3: "HI_RES_LOSSLESS",  # Hi-Res (was MQA, now lossless)
 }
 
+_DASH_NUMBER_RE = re.compile(r"\$Number(%0(\d+)d)?\$")
+
+
+def _local_name(tag: str) -> str:
+    return tag.split("}", 1)[-1]
+
+
+def _first_by_local_name(root: ElementTree.Element, name: str):
+    for el in root.iter():
+        if _local_name(el.tag) == name:
+            return el
+    return None
+
+
+def _expand_dash_template(
+    template: str, representation_id: str, number: int | None = None
+) -> str:
+    expanded = template.replace("$RepresentationID$", representation_id)
+
+    def _replace_number(match: re.Match) -> str:
+        if number is None:
+            return match.group(0)
+        width = int(match.group(2)) if match.group(2) else 0
+        return f"{number:0{width}d}" if width else str(number)
+
+    return _DASH_NUMBER_RE.sub(_replace_number, expanded)
+
+
+def parse_dash_manifest(manifest_b64: str) -> dict:
+    """Parse a Tidal DASH MPD into segment URLs, including the init segment."""
+    try:
+        manifest_xml = base64.b64decode(manifest_b64).decode("utf-8")
+        root = ElementTree.fromstring(manifest_xml)
+    except (ElementTree.ParseError, ValueError) as e:
+        raise Exception(f"Failed to parse DASH XML manifest: {e}") from e
+
+    representation = _first_by_local_name(root, "Representation")
+    if representation is None:
+        raise Exception("No Representation found in DASH manifest")
+
+    codecs = representation.get("codecs", "flac")
+    representation_id = representation.get("id", "")
+    segment_template = _first_by_local_name(representation, "SegmentTemplate")
+    if segment_template is None:
+        segment_template = _first_by_local_name(root, "SegmentTemplate")
+    if segment_template is None:
+        raise Exception("No SegmentTemplate found in DASH manifest")
+
+    initialization = segment_template.get("initialization")
+    media_template = segment_template.get("media")
+    if not media_template:
+        raise Exception("DASH SegmentTemplate is missing a media URL")
+
+    start_number = int(segment_template.get("startNumber", "0"))
+    timeline = _first_by_local_name(segment_template, "SegmentTimeline")
+    if timeline is None:
+        raise Exception("No SegmentTimeline found in DASH manifest")
+
+    segment_urls = []
+    if initialization:
+        segment_urls.append(_expand_dash_template(initialization, representation_id))
+
+    segment_number = start_number
+    for seg in timeline:
+        if _local_name(seg.tag) != "S":
+            continue
+        repeat = int(seg.get("r", "0"))
+        num_segments = repeat + 1 if repeat >= 0 else 1
+        for _ in range(num_segments):
+            segment_urls.append(
+                _expand_dash_template(
+                    media_template, representation_id, number=segment_number
+                )
+            )
+            segment_number += 1
+
+    return {
+        "urls": segment_urls,
+        "codecs": codecs,
+        "encryptionType": "NONE",
+        "mimeType": f"audio/{codecs}",
+    }
+
 
 class TidalClient(Client):
     """TidalClient."""
@@ -595,67 +678,8 @@ class TidalClient(Client):
         return last_match.group(1)
 
     async def _parse_dash_manifest(self, manifest_b64: str) -> dict:
-        """Parse DASH XML manifest into a format compatible with TidalDownloadable.
-
-        DASH manifests use MPEG-DASH format with segment templates.
-        Returns a dict with: urls (list of segment URLs), codecs, encryptionType
-        """
-        try:
-            manifest_xml = base64.b64decode(manifest_b64).decode("utf-8")
-            root = ElementTree.fromstring(manifest_xml)
-
-            # Define XML namespace for DASH
-            ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
-
-            # Find the first Representation element (highest quality is typically listed first or last)
-            representation = root.find(".//mpd:Representation", ns)
-            if representation is None:
-                raise Exception("No Representation found in DASH manifest")
-
-            # Extract codec info
-            codecs = representation.get("codecs", "flac")
-
-            # Find SegmentTemplate
-            segment_template = representation.find(".//mpd:SegmentTemplate", ns)
-            if segment_template is None:
-                raise Exception("No SegmentTemplate found in DASH manifest")
-
-            # Get media URL template
-            media_template = segment_template.get("media")
-            start_number = int(segment_template.get("startNumber", "0"))
-
-            # Get SegmentTimeline to determine number of segments
-            timeline = segment_template.find("mpd:SegmentTimeline", ns)
-            if timeline is None:
-                raise Exception("No SegmentTimeline found in DASH manifest")
-
-            segments = timeline.findall("mpd:S", ns)
-
-            # Calculate total number of segments from timeline
-            segment_urls = []
-            segment_number = start_number
-
-            for seg in segments:
-                repeat = int(seg.get("r", "0"))
-                # r=-1 means repeat until end, r=0 means 1 segment, r=N means N+1 segments
-                num_segments = repeat + 1 if repeat >= 0 else 1
-
-                for _ in range(num_segments):
-                    # Replace $Number$ placeholder with actual segment number
-                    url = media_template.replace("$Number$", str(segment_number))
-                    segment_urls.append(url)
-                    segment_number += 1
-
-            # Return in BTS manifest-compatible format
-            return {
-                "urls": segment_urls,
-                "codecs": codecs,
-                "encryptionType": "NONE",  # DASH manifests from tiddl analysis show no encryption
-                "mimeType": f"audio/{codecs}",
-            }
-
-        except ElementTree.ParseError as e:
-            raise Exception(f"Failed to parse DASH XML manifest: {e}")
+        """Parse DASH XML manifest into a format compatible with TidalDownloadable."""
+        return parse_dash_manifest(manifest_b64)
 
     # ---------- Login Utilities ---------------
 
