@@ -227,12 +227,12 @@ def rip(
     type=click.Path(exists=True, file_okay=False, dir_okay=True),
 )
 @click.option(
-    "--delete",
-    "delete",
+    "--apply",
+    "apply",
     is_flag=True,
     default=False,
-    help="Actually delete white-noise files. Without this flag the command "
-    "only reports what would be removed (dry run).",
+    help="Actually delete the corrupted files and clean the DB. Without this "
+    "flag the command only reports what would be changed (dry run).",
 )
 @click.option(
     "--workers",
@@ -243,45 +243,27 @@ def rip(
 @click.option(
     "--db-path",
     default=None,
-    help="Cross-reference findings with the streamrip downloads DB at this "
-    "path. Defaults to ~/.config/streamrip/downloads.db if it exists.",
+    help="Path to the streamrip downloads DB. Defaults to "
+    "~/.config/streamrip/downloads.db. The DB is always kept in sync with "
+    "file deletion — there is no separate flag for it.",
     type=click.Path(dir_okay=False),
 )
-@click.option(
-    "--clean-db",
-    "clean_db",
-    is_flag=True,
-    default=False,
-    help="Also DELETE matching rows from downloads_enhanced in the DB so "
-    "the tracks can be re-downloaded without --no-db. Implies --delete.",
-)
 @click.pass_context
-def repair(ctx, path, delete, workers, db_path, clean_db):
-    """Find and (optionally) remove white-noise audio files under PATH.
+def repair(ctx, path, apply, workers, db_path):
+    """Find and remove white-noise audio files left behind by a streamrip bug.
 
-    These are files left behind by an older streamrip bug where compressed
-    DASH fragments were decoded as raw PCM, producing static noise. The
-    original audio cannot be recovered from these files, so the only remedy
-    is to delete them and re-download.
+    Compressed DASH fragments used to be decoded as raw PCM, producing static
+    noise instead of music. The original audio cannot be recovered, so this
+    command detects the corrupted files, deletes them, and removes their rows
+    from the downloads database so the tracks can be re-downloaded normally.
 
-    By default the command performs a dry run and only lists the files that
-    would be deleted. Pass --delete to actually remove them. The command
-    also cross-references findings with the streamrip downloads database so
-    you know which track IDs to expect when re-downloading. Pass --clean-db
-    to additionally delete those rows from the DB so re-downloads work
-    without --no-db.
+    By default (no --apply) the command performs a dry run and only reports
+    what would be deleted. With --apply both the files and their DB rows are
+    removed in one shot.
     """
     from rich.table import Table
 
-    from ..repair import (
-        find_db_entries_for_paths,
-        remove_db_entries_for_paths,
-        remove_white_noise_files,
-        scan_for_white_noise,
-    )
-
-    if clean_db:
-        delete = True
+    from ..repair import repair_path
 
     path = Path(path)
     if not shutil.which("ffmpeg"):
@@ -290,69 +272,56 @@ def repair(ctx, path, delete, workers, db_path, clean_db):
         return
 
     console.print(f"[blue]Scanning {path} for white-noise files...[/blue]")
-    noise = scan_for_white_noise(path, max_workers=workers)
+    report = repair_path(
+        path,
+        db_path=db_path,
+        apply=False,
+        max_workers=workers,
+    )
 
-    if not noise:
+    if not report.noise:
         console.print("[green]No white-noise files found.[/green]")
         return
 
-    table = Table(title=f"White-noise files in {path}", show_lines=False)
-    table.add_column("ZCR", justify="right")
-    table.add_column("Path", overflow="fold")
-    for stats in noise:
+    file_table = Table(title=f"White-noise files in {path}", show_lines=False)
+    file_table.add_column("ZCR", justify="right")
+    file_table.add_column("Path", overflow="fold")
+    for stats in report.noise:
         zcr = "n/a" if stats.zcr is None else f"{stats.zcr:.4f}"
-        table.add_row(zcr, str(stats.path))
-    console.print(table)
+        file_table.add_row(zcr, str(stats.path))
+    console.print(file_table)
 
-    if db_path is None:
-        db_path = str(Path.home() / ".config" / "streamrip" / "downloads.db")
-    db_entries = find_db_entries_for_paths(db_path, [str(s.path) for s in noise])
-    if db_entries:
-        db_table = Table(
-            title=f"DB matches in {db_path}",
-            show_lines=False,
-        )
+    if report.db_entries:
+        db_table = Table(title="DB matches", show_lines=False)
         db_table.add_column("ID")
         db_table.add_column("Title", overflow="fold")
         db_table.add_column("Artist", overflow="fold")
         db_table.add_column("File", overflow="fold")
-        for e in db_entries:
+        for e in report.db_entries:
             db_table.add_row(e.id, e.title, e.artist, e.file_path)
         console.print(db_table)
-        if clean_db:
-            console.print(
-                "[yellow]--clean-db:[/yellow] will remove these rows from "
-                "[italic]downloads_enhanced[/italic]."
-            )
-        else:
-            console.print(
-                f"[yellow]Tip:[/yellow] these {len(db_entries)} tracks are "
-                "marked as downloaded in the DB. Pass [bold]--clean-db[/bold] "
-                "to remove the rows so re-downloads work without "
-                "[bold]--no-db[/bold]."
-            )
-    elif Path(db_path).exists():
-        console.print(f"[dim]No DB matches for the corrupted files in {db_path}.[/dim]")
 
-    if not delete:
+    if not apply:
         console.print(
-            "[yellow]Dry run.[/yellow] Pass [bold]--delete[/bold] to actually "
-            "remove these files."
+            "[yellow]Dry run.[/yellow] Pass [bold]--apply[/bold] to delete "
+            "the files and clean the DB."
         )
         return
 
-    removed = remove_white_noise_files(noise, dry_run=False)
-    console.print(f"[green]Removed {len(removed)} white-noise file(s).[/green]")
-    for r in removed:
-        console.print(f"  - {r}")
-
-    if clean_db and db_entries:
-        removed_ids = remove_db_entries_for_paths(
-            db_path, [e.file_path for e in db_entries], dry_run=False
-        )
-        console.print(
-            f"[green]Removed {len(removed_ids)} row(s) from {db_path}.[/green]"
-        )
+    # Apply: re-run with apply=True so file + DB changes happen together.
+    final = repair_path(
+        path,
+        db_path=db_path,
+        apply=True,
+        max_workers=workers,
+    )
+    console.print(
+        f"[green]Removed {len(final.removed_files)} white-noise file(s) "
+        f"and {len(final.removed_db_ids)} DB row(s).[/green]"
+    )
+    for f in final.removed_files:
+        console.print(f"  - {f}")
+    if final.removed_db_ids:
         console.print(
             "[blue]You can now re-download these tracks normally "
             "(no --no-db needed).[/blue]"

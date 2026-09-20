@@ -300,3 +300,60 @@ def remove_db_entries_for_paths(
     except sqlite3.DatabaseError as e:
         logger.warning("Could not update DB %s: %s", db_path, e)
         return []
+
+
+@dataclass(slots=True)
+class RepairReport:
+    """Aggregate result of a single :func:`repair_path` invocation."""
+
+    noise: list[AudioStats]
+    db_entries: list[DbEntry]
+    removed_files: list[Path]
+    removed_db_ids: list[str]
+    apply: bool
+
+
+def repair_path(
+    path: Path | str,
+    *,
+    db_path: Path | str | None = None,
+    apply: bool = False,
+    max_workers: int = 4,
+) -> RepairReport:
+    """Scan ``path``, report white-noise files, and (if ``apply``) delete the
+    files AND remove their rows from the downloads DB.
+
+    This is the one-shot helper used by ``rip repair PATH [--apply]``. By
+    default it returns the report without changing anything on disk so the
+    CLI can present a dry-run summary; with ``apply=True`` the file deletions
+    and DB row removals are committed.
+
+    The DB step is always tied to file deletion — there's no way to delete
+    files but leave the DB rows (or vice versa). The two operations belong
+    together because the whole point is to make the tracks re-downloadable.
+    """
+    path = Path(path)
+    if db_path is None:
+        db_path = str(Path.home() / ".config" / "streamrip" / "downloads.db")
+
+    noise = scan_for_white_noise(path, max_workers=max_workers)
+    db_entries = find_db_entries_for_paths(db_path, [str(s.path) for s in noise])
+
+    removed_files: list[Path] = []
+    removed_db_ids: list[str] = []
+    if apply:
+        removed_files = remove_white_noise_files(noise, dry_run=False)
+        if db_entries:
+            removed_db_ids = remove_db_entries_for_paths(
+                db_path,
+                [e.file_path for e in db_entries],
+                dry_run=False,
+            )
+
+    return RepairReport(
+        noise=noise,
+        db_entries=db_entries,
+        removed_files=removed_files,
+        removed_db_ids=removed_db_ids,
+        apply=apply,
+    )

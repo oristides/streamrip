@@ -1,7 +1,7 @@
 # Streamrip Makefile
 # Provides convenient commands for development, testing, and maintenance
 
-.PHONY: help install install-dev test test-db test-unit test-integration test-coverage lint format clean docs build install-deps check-deps repair-scan repair-delete repair-test
+.PHONY: help install install-dev test test-db test-unit test-integration test-coverage lint format clean docs build install-deps check-deps repair-scan repair-apply repair-test
 
 # Default target
 help: ## Show this help message
@@ -245,9 +245,9 @@ repair-scan: ## Dry-run: list white-noise files under PATH (use PATH=/some/dir)
 	@if [ -z "$(PATH)" ]; then echo "Usage: make repair-scan PATH=/path/to/music"; exit 1; fi
 	poetry run rip repair "$(PATH)"
 
-repair-delete: ## Delete white-noise files under PATH (use PATH=/some/dir)
-	@if [ -z "$(PATH)" ]; then echo "Usage: make repair-delete PATH=/path/to/music"; exit 1; fi
-	poetry run rip repair "$(PATH)" --delete
+repair-apply: ## Delete white-noise files AND clean DB rows under PATH (use PATH=/some/dir)
+	@if [ -z "$(PATH)" ]; then echo "Usage: make repair-apply PATH=/path/to/music"; exit 1; fi
+	poetry run rip repair "$(PATH)" --apply
 
 repair-test: ## Run repair module tests
 	poetry run pytest tests/test_repair.py -v

@@ -209,7 +209,7 @@ def test_repair_cli_runs_dry_run_by_default(tmp_path, monkeypatch):
 
 
 def test_repair_cli_with_delete_removes_files(tmp_path):
-    """`rip repair <path> --delete` actually removes white-noise files."""
+    """`rip repair <path> --apply` actually removes white-noise files."""
     from click.testing import CliRunner
 
     from streamrip.rip.cli import rip
@@ -222,7 +222,7 @@ def test_repair_cli_with_delete_removes_files(tmp_path):
     runner = CliRunner()
     result = runner.invoke(
         rip,
-        ["--no-progress", "repair", str(tmp_path), "--delete"],
+        ["--no-progress", "repair", str(tmp_path), "--apply"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -371,7 +371,7 @@ def test_remove_db_entries_dry_run_keeps_rows(tmp_path):
 
 
 def test_repair_cli_clean_db_removes_rows(tmp_path):
-    """`rip repair --clean-db` should delete matching DB rows."""
+    """`rip repair --apply` should delete matching DB rows AND files together."""
     import sqlite3
 
     from click.testing import CliRunner
@@ -403,7 +403,7 @@ def test_repair_cli_clean_db_removes_rows(tmp_path):
             str(tmp_path),
             "--db-path",
             str(db_path),
-            "--clean-db",
+            "--apply",
         ],
         catch_exceptions=False,
     )
@@ -419,7 +419,7 @@ def test_repair_cli_clean_db_removes_rows(tmp_path):
 
 
 def test_repair_cli_clean_db_dry_run_by_default(tmp_path):
-    """Without --clean-db or --delete, the DB rows stay intact."""
+    """Without --apply, files AND DB rows stay intact."""
     import sqlite3
 
     from click.testing import CliRunner
@@ -462,3 +462,134 @@ def test_repair_cli_clean_db_dry_run_by_default(tmp_path):
     assert rows == [("42",)]
     # File must still exist
     assert bad.exists()
+
+
+def test_repair_cli_apply_deletes_files_and_db_rows(tmp_path):
+    """`rip repair --apply` does the whole thing in one go (no --delete / --clean-db flags)."""
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from streamrip.rip.cli import rip
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads_enhanced (id TEXT, source TEXT, title TEXT, "
+        "artist TEXT, file_path TEXT)"
+    )
+    bad = tmp_path / "noise.flac"
+    _make_white_noise(bad)
+    ok = tmp_path / "ok.flac"
+    _make_sine(ok)
+    conn.execute(
+        "INSERT INTO downloads_enhanced VALUES (?, ?, ?, ?, ?)",
+        ("42", "tidal", "Bad Song", "Artist X", str(bad)),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        rip,
+        [
+            "--no-progress",
+            "repair",
+            str(tmp_path),
+            "--db-path",
+            str(db_path),
+            "--apply",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # File gone, ok file still there
+    assert not bad.exists()
+    assert ok.exists()
+    # DB row gone
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced").fetchall()
+    conn.close()
+    assert rows == []
+
+
+def test_repair_cli_apply_no_corruption_is_noop(tmp_path):
+    """If there's nothing to repair, --apply does nothing and exits clean."""
+    from click.testing import CliRunner
+
+    from streamrip.rip.cli import rip
+
+    runner = CliRunner()
+    result = runner.invoke(
+        rip,
+        ["--no-progress", "repair", str(tmp_path), "--apply"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "No white-noise files found" in result.output
+
+
+def test_repair_path_helper_does_everything(tmp_path):
+    """repair_path() should scan, delete files, and clean DB in one call."""
+    import sqlite3
+
+    from streamrip.repair import repair_path
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads_enhanced (id TEXT, source TEXT, title TEXT, "
+        "artist TEXT, file_path TEXT)"
+    )
+    bad = tmp_path / "noise.flac"
+    _make_white_noise(bad)
+    conn.execute(
+        "INSERT INTO downloads_enhanced VALUES (?, ?, ?, ?, ?)",
+        ("42", "tidal", "Bad Song", "Artist X", str(bad)),
+    )
+    conn.commit()
+    conn.close()
+
+    result = repair_path(tmp_path, db_path=db_path, apply=True, max_workers=2)
+
+    assert not bad.exists()
+    assert result.removed_files == [bad]
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced").fetchall()
+    conn.close()
+    assert rows == []
+    assert result.removed_db_ids == ["42"]
+
+
+def test_repair_path_helper_dry_run_changes_nothing(tmp_path):
+    import sqlite3
+
+    from streamrip.repair import repair_path
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads_enhanced (id TEXT, source TEXT, title TEXT, "
+        "artist TEXT, file_path TEXT)"
+    )
+    bad = tmp_path / "noise.flac"
+    _make_white_noise(bad)
+    conn.execute(
+        "INSERT INTO downloads_enhanced VALUES (?, ?, ?, ?, ?)",
+        ("42", "tidal", "Bad Song", "Artist X", str(bad)),
+    )
+    conn.commit()
+    conn.close()
+
+    result = repair_path(tmp_path, db_path=db_path, apply=False, max_workers=2)
+
+    assert bad.exists()
+    assert result.removed_files == []
+    assert result.removed_db_ids == []
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced").fetchall()
+    conn.close()
+    assert rows == [("42",)]
