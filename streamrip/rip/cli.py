@@ -247,8 +247,16 @@ def rip(
     "path. Defaults to ~/.config/streamrip/downloads.db if it exists.",
     type=click.Path(dir_okay=False),
 )
+@click.option(
+    "--clean-db",
+    "clean_db",
+    is_flag=True,
+    default=False,
+    help="Also DELETE matching rows from downloads_enhanced in the DB so "
+    "the tracks can be re-downloaded without --no-db. Implies --delete.",
+)
 @click.pass_context
-def repair(ctx, path, delete, workers, db_path):
+def repair(ctx, path, delete, workers, db_path, clean_db):
     """Find and (optionally) remove white-noise audio files under PATH.
 
     These are files left behind by an older streamrip bug where compressed
@@ -259,15 +267,21 @@ def repair(ctx, path, delete, workers, db_path):
     By default the command performs a dry run and only lists the files that
     would be deleted. Pass --delete to actually remove them. The command
     also cross-references findings with the streamrip downloads database so
-    you know which track IDs to expect when re-downloading.
+    you know which track IDs to expect when re-downloading. Pass --clean-db
+    to additionally delete those rows from the DB so re-downloads work
+    without --no-db.
     """
     from rich.table import Table
 
     from ..repair import (
         find_db_entries_for_paths,
+        remove_db_entries_for_paths,
         remove_white_noise_files,
         scan_for_white_noise,
     )
+
+    if clean_db:
+        delete = True
 
     path = Path(path)
     if not shutil.which("ffmpeg"):
@@ -305,13 +319,18 @@ def repair(ctx, path, delete, workers, db_path):
         for e in db_entries:
             db_table.add_row(e.id, e.title, e.artist, e.file_path)
         console.print(db_table)
-        console.print(
-            f"[yellow]Tip:[/yellow] these {len(db_entries)} tracks are "
-            "marked as downloaded in the DB. After deleting the files, you "
-            "can either re-download with [bold]rip --no-db ...[/bold] or "
-            "remove the matching rows from "
-            "[italic]downloads_enhanced[/italic]."
-        )
+        if clean_db:
+            console.print(
+                "[yellow]--clean-db:[/yellow] will remove these rows from "
+                "[italic]downloads_enhanced[/italic]."
+            )
+        else:
+            console.print(
+                f"[yellow]Tip:[/yellow] these {len(db_entries)} tracks are "
+                "marked as downloaded in the DB. Pass [bold]--clean-db[/bold] "
+                "to remove the rows so re-downloads work without "
+                "[bold]--no-db[/bold]."
+            )
     elif Path(db_path).exists():
         console.print(f"[dim]No DB matches for the corrupted files in {db_path}.[/dim]")
 
@@ -326,6 +345,18 @@ def repair(ctx, path, delete, workers, db_path):
     console.print(f"[green]Removed {len(removed)} white-noise file(s).[/green]")
     for r in removed:
         console.print(f"  - {r}")
+
+    if clean_db and db_entries:
+        removed_ids = remove_db_entries_for_paths(
+            db_path, [e.file_path for e in db_entries], dry_run=False
+        )
+        console.print(
+            f"[green]Removed {len(removed_ids)} row(s) from {db_path}.[/green]"
+        )
+        console.print(
+            "[blue]You can now re-download these tracks normally "
+            "(no --no-db needed).[/blue]"
+        )
 
 
 @rip.command()

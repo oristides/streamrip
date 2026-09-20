@@ -302,3 +302,163 @@ def test_find_db_entries_handles_missing_table(tmp_path):
 
     result = find_db_entries_for_paths(db_path, ["/x"])
     assert result == []
+
+
+def test_remove_db_entries_for_paths_removes_matching_rows(tmp_path):
+    """remove_db_entries_for_paths should DELETE rows whose file_path matches."""
+    import sqlite3
+
+    from streamrip.repair import remove_db_entries_for_paths
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE downloads_enhanced (id TEXT, file_path TEXT)")
+    conn.executemany(
+        "INSERT INTO downloads_enhanced VALUES (?, ?)",
+        [
+            ("123", "/music/good.flac"),
+            ("456", "/music/bad.m4a"),
+            ("789", "/music/other.flac"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    removed = remove_db_entries_for_paths(db_path, ["/music/bad.m4a"])
+    assert removed == ["456"]
+
+    # Verify the row is gone
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced ORDER BY id").fetchall()
+    conn.close()
+    assert rows == [("123",), ("789",)]
+
+
+def test_remove_db_entries_handles_missing_db(tmp_path):
+    from streamrip.repair import remove_db_entries_for_paths
+
+    result = remove_db_entries_for_paths(tmp_path / "no.db", ["/x"])
+    assert result == []
+
+
+def test_remove_db_entries_handles_empty_input(tmp_path):
+    from streamrip.repair import remove_db_entries_for_paths
+
+    result = remove_db_entries_for_paths(tmp_path / "x.db", [])
+    assert result == []
+
+
+def test_remove_db_entries_dry_run_keeps_rows(tmp_path):
+    import sqlite3
+
+    from streamrip.repair import remove_db_entries_for_paths
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE downloads_enhanced (id TEXT, file_path TEXT)")
+    conn.execute("INSERT INTO downloads_enhanced VALUES ('1', '/a.flac')")
+    conn.commit()
+    conn.close()
+
+    removed = remove_db_entries_for_paths(db_path, ["/a.flac"], dry_run=True)
+    assert removed == []
+
+    # Row must still be present
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced").fetchall()
+    conn.close()
+    assert rows == [("1",)]
+
+
+def test_repair_cli_clean_db_removes_rows(tmp_path):
+    """`rip repair --clean-db` should delete matching DB rows."""
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from streamrip.rip.cli import rip
+
+    # Set up DB with a row matching a noise file
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads_enhanced (id TEXT, source TEXT, title TEXT, "
+        "artist TEXT, file_path TEXT)"
+    )
+    bad = tmp_path / "noise.flac"
+    _make_white_noise(bad)
+    conn.execute(
+        "INSERT INTO downloads_enhanced VALUES (?, ?, ?, ?, ?)",
+        ("42", "tidal", "Bad Song", "Artist X", str(bad)),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        rip,
+        [
+            "--no-progress",
+            "repair",
+            str(tmp_path),
+            "--db-path",
+            str(db_path),
+            "--clean-db",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Row must be gone
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced").fetchall()
+    conn.close()
+    assert rows == []
+    # File must be gone too
+    assert not bad.exists()
+
+
+def test_repair_cli_clean_db_dry_run_by_default(tmp_path):
+    """Without --clean-db or --delete, the DB rows stay intact."""
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from streamrip.rip.cli import rip
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE downloads_enhanced (id TEXT, source TEXT, title TEXT, "
+        "artist TEXT, file_path TEXT)"
+    )
+    bad = tmp_path / "noise.flac"
+    _make_white_noise(bad)
+    conn.execute(
+        "INSERT INTO downloads_enhanced VALUES (?, ?, ?, ?, ?)",
+        ("42", "tidal", "Bad Song", "Artist X", str(bad)),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        rip,
+        [
+            "--no-progress",
+            "repair",
+            str(tmp_path),
+            "--db-path",
+            str(db_path),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Row must still be there in dry-run
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT id FROM downloads_enhanced").fetchall()
+    conn.close()
+    assert rows == [("42",)]
+    # File must still exist
+    assert bad.exists()

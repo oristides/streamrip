@@ -246,3 +246,57 @@ def find_db_entries_for_paths(
     except sqlite3.DatabaseError as e:
         logger.warning("Could not read DB %s: %s", db_path, e)
         return []
+
+
+def remove_db_entries_for_paths(
+    db_path: Path | str,
+    file_paths: list[Path] | list[str],
+    *,
+    table: str = "downloads_enhanced",
+    dry_run: bool = False,
+) -> list[str]:
+    """DELETE rows from ``table`` whose ``file_path`` matches one of the given paths.
+
+    Returns the IDs of rows that were (or would be, in dry-run mode) removed.
+    Gracefully handles a missing DB file, missing table, or empty input by
+    returning an empty list.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists() or not file_paths:
+        return []
+
+    paths = [str(p) for p in file_paths]
+    placeholders = ",".join("?" * len(paths))
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master " "WHERE type='table' AND name=?",
+                (table,),
+            )
+            if cur.fetchone() is None:
+                logger.debug("Table %s not present in %s", table, db_path)
+                return []
+
+            cur = conn.execute(
+                f"SELECT id FROM {table} WHERE file_path IN ({placeholders})",
+                paths,
+            )
+            ids = [row[0] for row in cur.fetchall()]
+
+            if dry_run or not ids:
+                return []
+
+            conn.execute(
+                f"DELETE FROM {table} WHERE file_path IN ({placeholders})",
+                paths,
+            )
+            conn.commit()
+            logger.info("Removed %d rows from %s in %s", len(ids), table, db_path)
+            return ids
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as e:
+        logger.warning("Could not update DB %s: %s", db_path, e)
+        return []
